@@ -1,0 +1,1836 @@
+```csharp
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.Reflection;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+using RDR2;
+using RDR2.Math;
+using RDR2.Native;
+using RDR2.UI;
+
+namespace UltimateRealism
+{
+    public sealed class UltimateRealismScript : Script
+    {
+        private readonly RealismConfig _cfg;
+        private readonly RealismLog _log;
+        private readonly GameContext _ctx;
+        private readonly PhysiologyEngine _physiology;
+        private readonly SmartPhysicsEngine _physics;
+        private readonly CampingEngine _camping;
+        private readonly PerceptionEngine _perception;
+        private readonly RealismHud _hud;
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private long _last;
+        private bool _stop;
+        private int _failStreak;
+
+        public UltimateRealismScript()
+        {
+            _cfg = RealismConfig.LoadOrCreate();
+            _log = new RealismLog(_cfg.LogFileName, _cfg.VerboseLog);
+            _ctx = new GameContext(_cfg, _log);
+            _physiology = new PhysiologyEngine(_ctx);
+            _physics = new SmartPhysicsEngine(_ctx, _physiology);
+            _camping = new CampingEngine(_ctx, _physiology);
+            _perception = new PerceptionEngine(_ctx, _camping);
+            _hud = new RealismHud(_ctx, _physiology, _physics);
+            _last = _clock.ElapsedTicks;
+            Tick += OnTick;
+            Aborted += OnAborted;
+            Interval = 0;
+            _log.Info("Boot", "UltimateRealism 2.1 started.");
+            _log.Info("Boot", "G camp | H pack | Reload+Duck eat | Reload+Jump drink | FrontendSelect HUD");
+        }
+
+        private void OnTick(object sender, EventArgs e)
+        {
+            if (_stop) return;
+            try
+            {
+                long now = _clock.ElapsedTicks;
+                float dt = (now - _last) / (float)Stopwatch.Frequency;
+                _last = now;
+                dt = Mathx.Clamp(dt, 0f, 0.25f);
+                if (Game.Player == null) return;
+                _ctx.Refresh(dt);
+                if (!_ctx.Valid) return;
+                if (_failStreak > 40)
+                {
+                    _log.Warn("Tick", "Failsafe: physics isolated.");
+                    Safe("Physiology", () => _physiology.Update(dt));
+                    Safe("Camping", () => _camping.Update(dt));
+                    _failStreak = 30;
+                    return;
+                }
+                Safe("Physics", () => _physics.Update(dt));
+                Safe("Physiology", () => _physiology.Update(dt));
+                Safe("Camping", () => _camping.Update(dt));
+                Safe("Perception", () => _perception.Update(dt));
+                Safe("HUD", () => _hud.Update(dt));
+                if (_failStreak > 0) _failStreak--;
+            }
+            catch (Exception ex)
+            {
+                _failStreak += 5;
+                _log.Error("Tick", "Unhandled", ex);
+            }
+        }
+
+        private void Safe(string name, Action fn)
+        {
+            try { fn(); }
+            catch (Exception ex)
+            {
+                _failStreak += 2;
+                _log.Error(name, "tick", ex);
+            }
+        }
+
+        private void OnAborted(object sender, EventArgs e)
+        {
+            _stop = true;
+            try { _camping.Dispose(); }
+            catch (Exception ex) { _log.Error("Boot", "Dispose", ex); }
+            _log.Info("Boot", "Clean abort.");
+        }
+    }
+
+    public sealed class RealismConfig
+    {
+        public float TickPhysiology = 0.20f;
+        public float TickCamping = 0.12f;
+        public float TickPerception = 0.18f;
+        public float TickHud = 0.25f;
+        public float PhysicsHz = 120f;
+        public int PhysicsMaxSubsteps = 8;
+        public float PhysicsMaxDt = 0.05f;
+        public float BasalHeartRate = 62f;
+        public float MaxHeartRate = 195f;
+        public float RestingCoreTempC = 37.0f;
+        public float HypothermiaCoreC = 35.0f;
+        public float HyperthermiaCoreC = 38.6f;
+        public float HungerMax = 100f;
+        public float ThirstMax = 100f;
+        public float StaminaMax = 100f;
+        public float HungerDrainPerHourRest = 4.5f;
+        public float ThirstDrainPerHourRest = 6.0f;
+        public float BodyMassKg = 78f;
+        public float EquipmentMassKgDefault = 8.5f;
+        public float WeaponMassScale = 1.0f;
+        public float Gravity = 9.81f;
+        public float AirDensity = 1.20f;
+        public float WaterDensity = 998f;
+        public float PedDragArea = 0.55f;
+        public float PedCd = 1.05f;
+        public float MaxAccelMps2 = 14.5f;
+        public float MaxDecelMps2 = 18.0f;
+        public float MaxHorizontalSpeed = 9.6f;
+        public float MaxVelocityDeltaPerStep = 0.55f;
+        public float MaxForceBlend = 0.72f;
+        public float SlopeSlideStartDeg = 31f;
+        public float SlopeUnwalkableDeg = 52f;
+        public float StumbleAccel = 13.5f;
+        public float ImpactStumbleSpeed = 4.8f;
+        public float RecoilMassRefKg = 3.2f;
+        public float WindAccelScale = 0.045f;
+        public float BuoyancyFactor = 0.92f;
+        public int PhysicsNearbyPedCap = 18;
+        public float PhysicsNearbyRadius = 14f;
+        public float CollisionRadius = 0.42f;
+        public float RestitutionPed = 0.12f;
+        public float FrictionBlend = 0.55f;
+        public float CampMaxSlopeDegrees = 12.5f;
+        public float CampMinClearRadius = 2.15f;
+        public float CampPlaceDistance = 1.85f;
+        public float CampfireSmokeDetectMeters = 85f;
+        public float CampfireLightDetectMetersNight = 70f;
+        public float FootstepTrailLifetimeSeconds = 240f;
+        public float FootstepSpacingMeters = 0.72f;
+        public float GunshotHearDayMeters = 160f;
+        public float GunshotHearNightMeters = 220f;
+        public float VoiceHearMeters = 28f;
+        public float LosMaxMeters = 95f;
+        public int PerceptionPedScanCap = 48;
+        public string LogFileName = "UltimateRealism.log";
+        public bool VerboseLog;
+
+        public static RealismConfig LoadOrCreate()
+        {
+            var cfg = new RealismConfig();
+            try
+            {
+                string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
+                string path = Path.Combine(dir, "UltimateRealism.ini");
+                if (!File.Exists(path))
+                {
+                    File.WriteAllText(path, DefaultIni, Encoding.UTF8);
+                    return cfg;
+                }
+                foreach (string raw in File.ReadAllLines(path))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line[0] == '#' || line[0] == ';' || line[0] == '[') continue;
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    cfg.Apply(line.Substring(0, eq).Trim(), line.Substring(eq + 1).Trim());
+                }
+            }
+            catch { }
+            return cfg;
+        }
+
+        private void Apply(string key, string val)
+        {
+            float f; int i; bool b;
+            switch (key)
+            {
+                case "TickPhysiology": if (Tf(val, out f)) TickPhysiology = f; break;
+                case "TickCamping": if (Tf(val, out f)) TickCamping = f; break;
+                case "TickPerception": if (Tf(val, out f)) TickPerception = f; break;
+                case "TickHud": if (Tf(val, out f)) TickHud = f; break;
+                case "PhysicsHz": if (Tf(val, out f)) PhysicsHz = f; break;
+                case "PhysicsMaxSubsteps": if (Ti(val, out i)) PhysicsMaxSubsteps = i; break;
+                case "PhysicsMaxDt": if (Tf(val, out f)) PhysicsMaxDt = f; break;
+                case "BasalHeartRate": if (Tf(val, out f)) BasalHeartRate = f; break;
+                case "MaxHeartRate": if (Tf(val, out f)) MaxHeartRate = f; break;
+                case "RestingCoreTempC": if (Tf(val, out f)) RestingCoreTempC = f; break;
+                case "HypothermiaCoreC": if (Tf(val, out f)) HypothermiaCoreC = f; break;
+                case "HyperthermiaCoreC": if (Tf(val, out f)) HyperthermiaCoreC = f; break;
+                case "HungerMax": if (Tf(val, out f)) HungerMax = f; break;
+                case "ThirstMax": if (Tf(val, out f)) ThirstMax = f; break;
+                case "StaminaMax": if (Tf(val, out f)) StaminaMax = f; break;
+                case "HungerDrainPerHourRest": if (Tf(val, out f)) HungerDrainPerHourRest = f; break;
+                case "ThirstDrainPerHourRest": if (Tf(val, out f)) ThirstDrainPerHourRest = f; break;
+                case "BodyMassKg": if (Tf(val, out f)) BodyMassKg = f; break;
+                case "EquipmentMassKgDefault": if (Tf(val, out f)) EquipmentMassKgDefault = f; break;
+                case "WeaponMassScale": if (Tf(val, out f)) WeaponMassScale = f; break;
+                case "Gravity": if (Tf(val, out f)) Gravity = f; break;
+                case "AirDensity": if (Tf(val, out f)) AirDensity = f; break;
+                case "WaterDensity": if (Tf(val, out f)) WaterDensity = f; break;
+                case "PedDragArea": if (Tf(val, out f)) PedDragArea = f; break;
+                case "PedCd": if (Tf(val, out f)) PedCd = f; break;
+                case "MaxAccelMps2": if (Tf(val, out f)) MaxAccelMps2 = f; break;
+                case "MaxDecelMps2": if (Tf(val, out f)) MaxDecelMps2 = f; break;
+                case "MaxHorizontalSpeed": if (Tf(val, out f)) MaxHorizontalSpeed = f; break;
+                case "MaxVelocityDeltaPerStep": if (Tf(val, out f)) MaxVelocityDeltaPerStep = f; break;
+                case "MaxForceBlend": if (Tf(val, out f)) MaxForceBlend = f; break;
+                case "SlopeSlideStartDeg": if (Tf(val, out f)) SlopeSlideStartDeg = f; break;
+                case "SlopeUnwalkableDeg": if (Tf(val, out f)) SlopeUnwalkableDeg = f; break;
+                case "StumbleAccel": if (Tf(val, out f)) StumbleAccel = f; break;
+                case "ImpactStumbleSpeed": if (Tf(val, out f)) ImpactStumbleSpeed = f; break;
+                case "RecoilMassRefKg": if (Tf(val, out f)) RecoilMassRefKg = f; break;
+                case "WindAccelScale": if (Tf(val, out f)) WindAccelScale = f; break;
+                case "BuoyancyFactor": if (Tf(val, out f)) BuoyancyFactor = f; break;
+                case "PhysicsNearbyPedCap": if (Ti(val, out i)) PhysicsNearbyPedCap = i; break;
+                case "PhysicsNearbyRadius": if (Tf(val, out f)) PhysicsNearbyRadius = f; break;
+                case "CollisionRadius": if (Tf(val, out f)) CollisionRadius = f; break;
+                case "RestitutionPed": if (Tf(val, out f)) RestitutionPed = f; break;
+                case "FrictionBlend": if (Tf(val, out f)) FrictionBlend = f; break;
+                case "CampMaxSlopeDegrees": if (Tf(val, out f)) CampMaxSlopeDegrees = f; break;
+                case "CampMinClearRadius": if (Tf(val, out f)) CampMinClearRadius = f; break;
+                case "CampPlaceDistance": if (Tf(val, out f)) CampPlaceDistance = f; break;
+                case "CampfireSmokeDetectMeters": if (Tf(val, out f)) CampfireSmokeDetectMeters = f; break;
+                case "CampfireLightDetectMetersNight": if (Tf(val, out f)) CampfireLightDetectMetersNight = f; break;
+                case "FootstepTrailLifetimeSeconds": if (Tf(val, out f)) FootstepTrailLifetimeSeconds = f; break;
+                case "FootstepSpacingMeters": if (Tf(val, out f)) FootstepSpacingMeters = f; break;
+                case "GunshotHearDayMeters": if (Tf(val, out f)) GunshotHearDayMeters = f; break;
+                case "GunshotHearNightMeters": if (Tf(val, out f)) GunshotHearNightMeters = f; break;
+                case "VoiceHearMeters": if (Tf(val, out f)) VoiceHearMeters = f; break;
+                case "LosMaxMeters": if (Tf(val, out f)) LosMaxMeters = f; break;
+                case "PerceptionPedScanCap": if (Ti(val, out i)) PerceptionPedScanCap = i; break;
+                case "LogFileName": LogFileName = val; break;
+                case "VerboseLog": if (Tb(val, out b)) VerboseLog = b; break;
+            }
+        }
+
+        private static bool Tf(string s, out float f) => float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out f);
+        private static bool Ti(string s, out int i) => int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out i);
+        private static bool Tb(string s, out bool b)
+        {
+            if (bool.TryParse(s, out b)) return true;
+            if (s == "1" || s.Equals("yes", StringComparison.OrdinalIgnoreCase)) { b = true; return true; }
+            if (s == "0" || s.Equals("no", StringComparison.OrdinalIgnoreCase)) { b = false; return true; }
+            b = false; return false;
+        }
+
+        private const string DefaultIni =
+@"[Ticks]
+TickPhysiology=0.20
+TickCamping=0.12
+TickPerception=0.18
+TickHud=0.25
+PhysicsHz=120
+PhysicsMaxSubsteps=8
+PhysicsMaxDt=0.05
+[Physiology]
+BasalHeartRate=62
+MaxHeartRate=195
+RestingCoreTempC=37.0
+HypothermiaCoreC=35.0
+HyperthermiaCoreC=38.6
+HungerMax=100
+ThirstMax=100
+StaminaMax=100
+HungerDrainPerHourRest=4.5
+ThirstDrainPerHourRest=6.0
+[Physics]
+BodyMassKg=78
+EquipmentMassKgDefault=8.5
+WeaponMassScale=1.0
+Gravity=9.81
+AirDensity=1.20
+WaterDensity=998
+PedDragArea=0.55
+PedCd=1.05
+MaxAccelMps2=14.5
+MaxDecelMps2=18.0
+MaxHorizontalSpeed=9.6
+MaxVelocityDeltaPerStep=0.55
+MaxForceBlend=0.72
+SlopeSlideStartDeg=31
+SlopeUnwalkableDeg=52
+StumbleAccel=13.5
+ImpactStumbleSpeed=4.8
+RecoilMassRefKg=3.2
+WindAccelScale=0.045
+BuoyancyFactor=0.92
+PhysicsNearbyPedCap=18
+PhysicsNearbyRadius=14
+CollisionRadius=0.42
+RestitutionPed=0.12
+FrictionBlend=0.55
+[Camping]
+CampMaxSlopeDegrees=12.5
+CampMinClearRadius=2.15
+CampPlaceDistance=1.85
+CampfireSmokeDetectMeters=85
+CampfireLightDetectMetersNight=70
+[Perception]
+FootstepTrailLifetimeSeconds=240
+FootstepSpacingMeters=0.72
+GunshotHearDayMeters=160
+GunshotHearNightMeters=220
+VoiceHearMeters=28
+LosMaxMeters=95
+PerceptionPedScanCap=48
+[System]
+LogFileName=UltimateRealism.log
+VerboseLog=false
+";
+    }
+
+    public static class Mathx
+    {
+        public const float Deg2Rad = 0.01745329251f;
+        public const float Rad2Deg = 57.2957795131f;
+        public const float Eps = 1e-5f;
+        public static float Clamp(float v, float a, float b) { if (v < a) return a; if (v > b) return b; return v; }
+        public static int ClampI(int v, int a, int b) { if (v < a) return a; if (v > b) return b; return v; }
+        public static float Lerp(float a, float b, float t) => a + (b - a) * Clamp(t, 0f, 1f);
+        public static float Saturate(float v) => Clamp(v, 0f, 1f);
+        public static float ExpDecay(float rate, float dt) => 1f - (float)Math.Exp(-Math.Max(0f, rate) * dt);
+        public static float SmoothDamp(float current, float target, ref float vel, float smooth, float maxSpeed, float dt)
+        {
+            smooth = Math.Max(0.0001f, smooth);
+            float omega = 2f / smooth;
+            float x = omega * dt;
+            float exp = 1f / (1f + x + 0.48f * x * x + 0.235f * x * x * x);
+            float change = current - target;
+            float maxChange = maxSpeed * smooth;
+            change = Clamp(change, -maxChange, maxChange);
+            float temp = (vel + omega * change) * dt;
+            vel = (vel - omega * temp) * exp;
+            float output = target + (change + temp) * exp;
+            if ((target - current > 0f) == (output > target)) { output = target; vel = 0f; }
+            return output;
+        }
+        public static bool Finite(Vector3 v)
+        {
+            return !(float.IsNaN(v.X) || float.IsNaN(v.Y) || float.IsNaN(v.Z) || float.IsInfinity(v.X) || float.IsInfinity(v.Y) || float.IsInfinity(v.Z));
+        }
+        public static Vector3 ClampLength(Vector3 v, float max)
+        {
+            float l = v.Length();
+            if (l > max && l > Eps) return v * (max / l);
+            return v;
+        }
+        public static Vector3 Horizontal(Vector3 v) => new Vector3(v.X, v.Y, 0f);
+        public static float HorizontalLength(Vector3 v) => (float)Math.Sqrt(v.X * v.X + v.Y * v.Y);
+        public static Vector3 SafeNormalize(Vector3 v)
+        {
+            float l = v.Length();
+            if (l < Eps) return Vector3.Zero;
+            return v * (1f / l);
+        }
+        public static float Dot(Vector3 a, Vector3 b) => a.X * b.X + a.Y * b.Y + a.Z * b.Z;
+        public static Vector3 ProjectOnPlane(Vector3 v, Vector3 n)
+        {
+            n = SafeNormalize(n);
+            return v - n * Dot(v, n);
+        }
+        public static float NormalizeDeg(float a) { while (a > 180f) a -= 360f; while (a < -180f) a += 360f; return a; }
+        public static float Normalize360(float a) { while (a < 0f) a += 360f; while (a >= 360f) a -= 360f; return a; }
+        public static Vector3 HeadingToForward(float headingDeg)
+        {
+            float r = headingDeg * Deg2Rad;
+            return new Vector3(-(float)Math.Sin(r), (float)Math.Cos(r), 0f);
+        }
+    }
+
+    public sealed class RealismLog
+    {
+        private readonly object _gate = new object();
+        private readonly string _path;
+        private readonly bool _verbose;
+        private long _seq;
+        public RealismLog(string fileName, bool verbose)
+        {
+            _verbose = verbose;
+            string dir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".";
+            _path = Path.Combine(dir, string.IsNullOrWhiteSpace(fileName) ? "UltimateRealism.log" : fileName);
+            try
+            {
+                File.AppendAllText(_path, Environment.NewLine + "==== UltimateRealism " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " ====" + Environment.NewLine, Encoding.UTF8);
+            }
+            catch { }
+        }
+        public void Info(string sys, string msg) => Write("INFO", sys, msg);
+        public void Warn(string sys, string msg) => Write("WARN", sys, msg);
+        public void Verbose(string sys, string msg) { if (_verbose) Write("VERB", sys, msg); }
+        public void Error(string sys, string msg, Exception ex = null)
+        {
+            string extra = ex == null ? "" : " | " + ex.GetType().FullName + ": " + ex.Message + Environment.NewLine + ex.StackTrace;
+            Write("ERROR", sys, msg + extra);
+        }
+        private void Write(string level, string sys, string message)
+        {
+            try
+            {
+                long n = Interlocked.Increment(ref _seq);
+                string line = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " [" + level + "] [" + sys + "] #" + n + " " + message + Environment.NewLine;
+                lock (_gate) File.AppendAllText(_path, line, Encoding.UTF8);
+            }
+            catch { }
+        }
+    }
+
+    public static class NativeBridge
+    {
+        public static bool EntityOk(Entity e) { try { return e != null && e.Exists(); } catch { return false; } }
+        public static bool PedOk(Ped p) { try { return p != null && p.Exists() && !p.IsDead; } catch { return false; } }
+        public static Vector3 Velocity(Entity e) { try { return Function.Call<Vector3>(Hash.GET_ENTITY_VELOCITY, e.Handle); } catch { return Vector3.Zero; } }
+        public static void SetVelocity(Entity e, Vector3 v)
+        {
+            if (!EntityOk(e) || !Mathx.Finite(v)) return;
+            v = Mathx.ClampLength(v, 42f);
+            try { Function.Call(Hash.SET_ENTITY_VELOCITY, e.Handle, v.X, v.Y, v.Z); } catch { }
+        }
+        public static float Speed(Entity e) { try { return Function.Call<float>(Hash.GET_ENTITY_SPEED, e.Handle); } catch { return 0f; } }
+        public static Vector3 Forward(Entity e)
+        {
+            try
+            {
+                Vector3 f = Function.Call<Vector3>(Hash.GET_ENTITY_FORWARD_VECTOR, e.Handle);
+                if (Mathx.Finite(f) && f.Length() > 0.001f) return f;
+            }
+            catch { }
+            if (!EntityOk(e)) return new Vector3(0f, 1f, 0f);
+            return Mathx.HeadingToForward(e.Heading);
+        }
+        public static bool TryGroundZ(Vector3 pos, out float z)
+        {
+            z = pos.Z;
+            try
+            {
+                OutputArgument outZ = new OutputArgument();
+                bool ok = Function.Call<bool>(Hash.GET_GROUND_Z_FOR_3D_COORD, pos.X, pos.Y, pos.Z + 80f, outZ, false);
+                float gz = outZ.GetResult<float>();
+                if (ok && Math.Abs(gz) > 0.0001f) { z = gz; return true; }
+            }
+            catch { }
+            return false;
+        }
+        public static bool TryWaterHeight(Vector3 pos, out float h)
+        {
+            h = -10000f;
+            try
+            {
+                OutputArgument outH = new OutputArgument();
+                bool ok = Function.Call<bool>(Hash.GET_WATER_HEIGHT, pos.X, pos.Y, pos.Z, outH);
+                h = outH.GetResult<float>();
+                return ok;
+            }
+            catch { return false; }
+        }
+        public static bool Ray(Vector3 from, Vector3 to, int flags, int ignore, out Vector3 hit, out Vector3 normal, out int ent, out bool didHit)
+        {
+            hit = to; normal = new Vector3(0f, 0f, 1f); ent = 0; didHit = false;
+            try
+            {
+                int handle = Function.Call<int>(Hash.START_SHAPE_TEST_LOS_PROBE, from.X, from.Y, from.Z, to.X, to.Y, to.Z, flags, ignore, 7);
+                OutputArgument hitA = new OutputArgument();
+                OutputArgument endA = new OutputArgument();
+                OutputArgument nA = new OutputArgument();
+                OutputArgument eA = new OutputArgument();
+                int st = Function.Call<int>(Hash.GET_SHAPE_TEST_RESULT, handle, hitA, endA, nA, eA);
+                if (st != 2) return false;
+                didHit = hitA.GetResult<bool>();
+                hit = endA.GetResult<Vector3>();
+                normal = nA.GetResult<Vector3>();
+                ent = eA.GetResult<int>();
+                if (!Mathx.Finite(hit)) hit = to;
+                if (!Mathx.Finite(normal) || normal.Length() < 0.001f) normal = new Vector3(0f, 0f, 1f);
+                else normal = Mathx.SafeNormalize(normal);
+                return true;
+            }
+            catch { return false; }
+        }
+        public static bool ClearLos(Vector3 from, Vector3 to, int flags, int ignore, out Vector3 hit, out int ent)
+        {
+            Vector3 n; bool did;
+            if (!Ray(from, to, flags, ignore, out hit, out n, out ent, out did)) return false;
+            return !did;
+        }
+        public static float Rain() { try { return Mathx.Saturate(Function.Call<float>(Hash.GET_RAIN_LEVEL)); } catch { return 0f; } }
+        public static float Snow() { try { return Mathx.Saturate(Function.Call<float>(Hash.GET_SNOW_LEVEL)); } catch { return 0f; } }
+        public static float WindSpeed() { try { return Function.Call<float>(Hash.GET_WIND_SPEED); } catch { return 0f; } }
+        public static Vector3 WindVector()
+        {
+            float s = WindSpeed();
+            try
+            {
+                Vector3 d = Function.Call<Vector3>(Hash.GET_WIND_DIRECTION);
+                if (Mathx.Finite(d) && d.Length() > 0.01f) return Mathx.SafeNormalize(d) * s;
+            }
+            catch { }
+            return new Vector3(0.15f, 0.05f, 0f) * s;
+        }
+        public static int ClockHours() { try { return Function.Call<int>(Hash.GET_CLOCK_HOURS); } catch { return 12; } }
+        public static int ClockMinutes() { try { return Function.Call<int>(Hash.GET_CLOCK_MINUTES); } catch { return 0; } }
+        public static bool Night() { int h = ClockHours(); return h >= 20 || h < 5; }
+        public static float AmbientC(Vector3 p)
+        {
+            try
+            {
+                float t = Function.Call<float>(Hash.GET_TEMPERATURE_AT_COORDS, p.X, p.Y, p.Z);
+                if (t > -70f && t < 85f) return t;
+            }
+            catch { }
+            float hour = ClockHours() + ClockMinutes() / 60f;
+            float diurnal = 8f * (float)Math.Sin((hour - 6f) / 24f * Math.PI * 2.0);
+            return 16f + diurnal - Rain() * 6f - Snow() * 14f;
+        }
+        public static bool InWater(Entity e) { try { return Function.Call<bool>(Hash.IS_ENTITY_IN_WATER, e.Handle); } catch { return false; } }
+        public static bool PedFlag(Hash hash, Ped ped) { try { return Function.Call<bool>(hash, ped.Handle); } catch { return false; } }
+        public static bool ModelLoaded(uint hash) { try { return Function.Call<bool>(Hash.HAS_MODEL_LOADED, hash); } catch { return false; } }
+        public static void RequestModel(uint hash) { try { Function.Call(Hash.REQUEST_MODEL, hash); } catch { } }
+        public static void ReleaseModel(uint hash) { try { Function.Call(Hash.SET_MODEL_AS_NO_LONGER_NEEDED, hash); } catch { } }
+        public static bool DoesExist(int handle) { try { return handle != 0 && Function.Call<bool>(Hash.DOES_ENTITY_EXIST, handle); } catch { return false; } }
+        public static bool CutsceneBlocking()
+        {
+            try
+            {
+                if (Function.Call<bool>(Hash.IS_CUTSCENE_ACTIVE)) return true;
+                if (Function.Call<bool>(Hash.IS_PAUSE_MENU_ACTIVE)) return true;
+            }
+            catch { }
+            return false;
+        }
+        public static Vector3 CameraForward()
+        {
+            try
+            {
+                Vector3 d = GameplayCamera.Direction;
+                if (Mathx.Finite(d) && d.Length() > 0.01f) return d;
+            }
+            catch { }
+            return new Vector3(0f, 1f, 0f);
+        }
+    }
+
+    public sealed class GameContext
+    {
+        public RealismConfig Cfg { get; }
+        public RealismLog Log { get; }
+        public Ped Player { get; private set; }
+        public Vector3 Pos { get; private set; }
+        public Vector3 Fwd { get; private set; }
+        public Vector3 Vel { get; private set; }
+        public float Speed { get; private set; }
+        public float Dt { get; private set; }
+        public float Rain { get; private set; }
+        public float Snow { get; private set; }
+        public float Wind { get; private set; }
+        public Vector3 WindVec { get; private set; }
+        public float AmbientC { get; private set; }
+        public bool Night { get; private set; }
+        public bool InWater { get; private set; }
+        public bool OnMount { get; private set; }
+        public bool InVehicle { get; private set; }
+        public bool Shooting { get; private set; }
+        public bool Sprinting { get; private set; }
+        public bool Running { get; private set; }
+        public bool Walking { get; private set; }
+        public bool Stealth { get; private set; }
+        public bool Climbing { get; private set; }
+        public bool Swimming { get; private set; }
+        public bool Jumping { get; private set; }
+        public bool Aiming { get; private set; }
+        public bool Ragdoll { get; private set; }
+        public bool OnFoot { get; private set; }
+        public bool Valid { get; private set; }
+        public bool Blocked { get; private set; }
+        public GameContext(RealismConfig cfg, RealismLog log) { Cfg = cfg; Log = log; }
+        public void Refresh(float dt)
+        {
+            Dt = Mathx.Clamp(dt, 0f, 0.25f);
+            Valid = false;
+            Blocked = NativeBridge.CutsceneBlocking();
+            Player ply = Game.Player;
+            if (ply == null) return;
+            Ped ped = ply.Character;
+            if (!NativeBridge.PedOk(ped)) return;
+            Player = ped;
+            Pos = ped.Position;
+            Fwd = NativeBridge.Forward(ped);
+            Vel = NativeBridge.Velocity(ped);
+            Speed = NativeBridge.Speed(ped);
+            Rain = NativeBridge.Rain();
+            Snow = NativeBridge.Snow();
+            WindVec = NativeBridge.WindVector();
+            Wind = WindVec.Length();
+            AmbientC = NativeBridge.AmbientC(Pos);
+            Night = NativeBridge.Night();
+            InWater = NativeBridge.InWater(ped);
+            OnMount = NativeBridge.PedFlag(Hash.IS_PED_ON_MOUNT, ped);
+            InVehicle = ped.IsInVehicle();
+            Shooting = NativeBridge.PedFlag(Hash.IS_PED_SHOOTING, ped);
+            Sprinting = NativeBridge.PedFlag(Hash.IS_PED_SPRINTING, ped);
+            Running = NativeBridge.PedFlag(Hash.IS_PED_RUNNING, ped);
+            Walking = NativeBridge.PedFlag(Hash.IS_PED_WALKING, ped);
+            Climbing = NativeBridge.PedFlag(Hash.IS_PED_CLIMBING, ped);
+            Swimming = NativeBridge.PedFlag(Hash.IS_PED_SWIMMING, ped);
+            Jumping = NativeBridge.PedFlag(Hash.IS_PED_JUMPING, ped);
+            try { Stealth = Function.Call<bool>(Hash.GET_PED_STEALTH_MOVEMENT, ped.Handle); } catch { Stealth = false; }
+            Aiming = ped.IsAiming;
+            Ragdoll = ped.IsRagdoll;
+            OnFoot = !OnMount && !InVehicle && !Swimming;
+            Valid = true;
+        }
+    }
+
+    public sealed class KeyEdge
+    {
+        private bool _prev;
+        public bool WentDown(Keys key)
+        {
+            bool now = false;
+            try { now = Game.IsKeyPressed(key); } catch { now = false; }
+            bool edge = now && !_prev;
+            _prev = now;
+            return edge;
+        }
+    }
+
+    public sealed class PhysiologyState
+    {
+        public float HeartRate = 62f;
+        public float CoreTempC = 37f;
+        public float MuscleFatigue;
+        public float Hunger = 82f;
+        public float Thirst = 78f;
+        public float Stamina = 100f;
+        public float BloodOxygen = 98f;
+        public float Hydration = 1f;
+        public float Glycogen = 1f;
+        public float Lactate;
+        public float HandTremor;
+        public float ReactionPenalty;
+        public float MovePenalty;
+        public float AimPenalty;
+        public float GripPenalty;
+        public float Wetness;
+        public float ColdExposure;
+        public float HeatExposure;
+        public float TerrainStrain;
+        public float BreathPhase;
+        public int BaseAccuracy = -1;
+        public bool IsHypothermic;
+        public bool IsHyperthermic;
+        public bool IsExhausted;
+        public bool IsStarving;
+        public bool IsDehydrated;
+    }
+
+    public enum GroundKind { Unknown, Dirt, Grass, Rock, Mud, Sand, Snow, Ice, Wood, Water, Metal }
+
+    public struct SurfaceHit
+    {
+        public bool Valid;
+        public Vector3 Point;
+        public Vector3 Normal;
+        public float SlopeDeg;
+        public GroundKind Kind;
+        public float MuStatic;
+        public float MuKinetic;
+        public float Restitution;
+        public float Softness;
+        public bool Wet;
+    }
+
+    public sealed class SurfaceSampler
+    {
+        private readonly GameContext _ctx;
+        private SurfaceHit _cache;
+        private Vector3 _cachePos;
+        private float _cacheAge = 999f;
+        public SurfaceSampler(GameContext ctx) { _ctx = ctx; }
+        public SurfaceHit SamplePlayer(float dt)
+        {
+            _cacheAge += dt;
+            if (_cache.Valid && _cacheAge < 0.05f && _ctx.Pos.DistanceTo(_cachePos) < 0.18f) return _cache;
+            _cache = SampleAt(_ctx.Pos, _ctx.Player != null ? _ctx.Player.Handle : 0);
+            _cachePos = _ctx.Pos;
+            _cacheAge = 0f;
+            return _cache;
+        }
+        public SurfaceHit SampleAt(Vector3 pos, int ignore)
+        {
+            var hit = new SurfaceHit { Valid = false, Point = pos, Normal = new Vector3(0f, 0f, 1f), Kind = GroundKind.Dirt, MuStatic = 0.85f, MuKinetic = 0.70f, Restitution = 0.05f, Softness = 0.15f };
+            Vector3 from = pos + new Vector3(0f, 0f, 1.35f);
+            Vector3 to = pos + new Vector3(0f, 0f, -2.8f);
+            Vector3 hp, n; int ent; bool did;
+            if (!NativeBridge.Ray(from, to, 1 | 16 | 256, ignore, out hp, out n, out ent, out did) || !did)
+            {
+                float gz;
+                if (NativeBridge.TryGroundZ(pos, out gz)) { hit.Valid = true; hit.Point = new Vector3(pos.X, pos.Y, gz); Classify(ref hit, pos); }
+                return hit;
+            }
+            hit.Valid = true;
+            hit.Point = hp;
+            hit.Normal = n.Z < 0.08f ? new Vector3(0f, 0f, 1f) : n;
+            hit.SlopeDeg = (float)Math.Acos(Mathx.Clamp(hit.Normal.Z, 0f, 1f)) * Mathx.Rad2Deg;
+            Classify(ref hit, pos);
+            return hit;
+        }
+        private void Classify(ref SurfaceHit hit, Vector3 pos)
+        {
+            float rain = _ctx.Rain, snow = _ctx.Snow, waterH;
+            bool water = NativeBridge.TryWaterHeight(pos, out waterH) && waterH >= hit.Point.Z - 0.07f;
+            if (water || _ctx.InWater)
+            {
+                hit.Kind = GroundKind.Water; hit.MuStatic = 0.18f; hit.MuKinetic = 0.12f; hit.Restitution = 0f; hit.Softness = 1f; hit.Wet = true; return;
+            }
+            if (snow > 0.35f) hit.Kind = _ctx.AmbientC < -2f ? GroundKind.Ice : GroundKind.Snow;
+            else if (rain > 0.45f) hit.Kind = GroundKind.Mud;
+            else if (hit.SlopeDeg > 28f) hit.Kind = GroundKind.Rock;
+            else hit.Kind = GroundKind.Dirt;
+            switch (hit.Kind)
+            {
+                case GroundKind.Ice: hit.MuStatic = 0.12f; hit.MuKinetic = 0.06f; hit.Restitution = 0.02f; hit.Softness = 0.05f; break;
+                case GroundKind.Snow: hit.MuStatic = 0.38f; hit.MuKinetic = 0.30f; hit.Restitution = 0.01f; hit.Softness = 0.55f; break;
+                case GroundKind.Mud: hit.MuStatic = 0.42f; hit.MuKinetic = 0.28f; hit.Restitution = 0f; hit.Softness = 0.70f; hit.Wet = true; break;
+                case GroundKind.Rock: hit.MuStatic = 0.90f; hit.MuKinetic = 0.72f; hit.Restitution = 0.08f; hit.Softness = 0.02f; break;
+                case GroundKind.Sand: hit.MuStatic = 0.50f; hit.MuKinetic = 0.40f; hit.Restitution = 0f; hit.Softness = 0.45f; break;
+                case GroundKind.Wood: hit.MuStatic = 0.70f; hit.MuKinetic = 0.55f; hit.Restitution = 0.06f; hit.Softness = 0.10f; break;
+                default: hit.MuStatic = 0.82f; hit.MuKinetic = 0.66f; hit.Restitution = 0.04f; hit.Softness = 0.18f; break;
+            }
+            if (rain > 0.12f && hit.Kind != GroundKind.Ice)
+            {
+                float w = Mathx.Saturate(rain);
+                hit.MuStatic *= 1f - 0.35f * w;
+                hit.MuKinetic *= 1f - 0.40f * w;
+                hit.Wet = true;
+            }
+        }
+    }
+
+    public static class LoadoutMass
+    {
+        public static float EstimateKg(Ped ped, float pack, float weaponScale)
+        {
+            float kg = pack;
+            try
+            {
+                OutputArgument weap = new OutputArgument();
+                Function.Call<bool>(Hash.GET_CURRENT_PED_WEAPON, ped.Handle, weap, true, 0, true);
+                kg += Classify(weap.GetResult<uint>()) * weaponScale;
+            }
+            catch { kg += 2.2f * weaponScale; }
+            return Mathx.Clamp(kg, 4f, 55f);
+        }
+        public static float WeaponKg(Ped ped)
+        {
+            try
+            {
+                OutputArgument weap = new OutputArgument();
+                Function.Call<bool>(Hash.GET_CURRENT_PED_WEAPON, ped.Handle, weap, true, 0, true);
+                return Classify(weap.GetResult<uint>());
+            }
+            catch { return 2.4f; }
+        }
+        private static float Classify(uint hash)
+        {
+            if (hash == 0) return 0.4f;
+            uint m = hash & 0xF;
+            if (m < 4) return 1.15f;
+            if (m < 9) return 3.4f;
+            return 4.9f;
+        }
+    }
+
+    public sealed class PhysiologyEngine
+    {
+        private readonly GameContext _ctx;
+        private readonly PhysiologyState _s = new PhysiologyState();
+        private float _hrVel, _tempVel, _stamVel, _accum, _shakeAmp;
+        private int _lastHealth = -1;
+        private uint _lastShake;
+        public PhysiologyState State { get { return _s; } }
+        public SurfaceHit LastSurface;
+        public PhysiologyEngine(GameContext ctx) { _ctx = ctx; }
+        public void NotifySurface(SurfaceHit s) { LastSurface = s; }
+        public void Update(float dt)
+        {
+            if (!_ctx.Valid) return;
+            _accum += dt;
+            if (_accum < _ctx.Cfg.TickPhysiology) return;
+            float step = _accum; _accum = 0f;
+            Simulate(step);
+            ApplyEffects();
+        }
+        private void Simulate(float dt)
+        {
+            var cfg = _ctx.Cfg;
+            Ped ped = _ctx.Player;
+            float met = Metabolic();
+            float hours = dt / 3600f;
+            float hungerMul = 1f + Math.Max(0f, met - 1f) * 0.18f + _s.ColdExposure * 0.35f;
+            float thirstMul = 1f + Math.Max(0f, met - 1f) * 0.28f + _s.HeatExposure * 0.85f;
+            _s.Hunger = Mathx.Clamp(_s.Hunger - cfg.HungerDrainPerHourRest * hungerMul * hours * cfg.HungerMax / 8f, 0f, cfg.HungerMax);
+            _s.Thirst = Mathx.Clamp(_s.Thirst - cfg.ThirstDrainPerHourRest * thirstMul * hours * cfg.ThirstMax / 6f, 0f, cfg.ThirstMax);
+            FieldConsume();
+            _s.Glycogen = Mathx.Lerp(_s.Glycogen, _s.Hunger / cfg.HungerMax, Mathx.ExpDecay(0.15f, dt));
+            _s.Hydration = Mathx.Lerp(_s.Hydration, _s.Thirst / cfg.ThirstMax, Mathx.ExpDecay(0.18f, dt));
+            Exposure(dt); CoreTemp(dt, met); Cardio(dt, met); Fatigue(dt, met); StaminaTick(dt, met); Penalties();
+            int hp = ped.Health;
+            if (_lastHealth >= 0 && hp < _lastHealth)
+            {
+                float dmg = _lastHealth - hp;
+                _s.HeartRate = Mathx.Clamp(_s.HeartRate + dmg * 1.6f, cfg.BasalHeartRate, cfg.MaxHeartRate);
+                _s.Lactate = Mathx.Clamp(_s.Lactate + dmg * 0.08f, 0f, 20f);
+                _ctx.Log.Info("Physiology", "Damage " + dmg.ToString("0.0") + " HR=" + _s.HeartRate.ToString("0.0"));
+            }
+            _lastHealth = hp;
+            _s.IsHypothermic = _s.CoreTempC <= cfg.HypothermiaCoreC;
+            _s.IsHyperthermic = _s.CoreTempC >= cfg.HyperthermiaCoreC;
+            _s.IsExhausted = _s.MuscleFatigue > 82f || _s.Stamina < 8f;
+            _s.IsStarving = _s.Hunger < 12f;
+            _s.IsDehydrated = _s.Thirst < 12f;
+            _s.BreathPhase += dt * Mathx.Clamp(_s.HeartRate / 60f, 0.4f, 3.2f);
+        }
+        private float Metabolic()
+        {
+            float met = 1.05f;
+            if (_ctx.OnMount) met = 1.8f;
+            else if (_ctx.Swimming) met = 6.2f;
+            else if (_ctx.Climbing) met = 8.0f;
+            else if (_ctx.Sprinting) met = 9.4f;
+            else if (_ctx.Running) met = 6.8f;
+            else if (_ctx.Walking) met = 3.1f;
+            else if (_ctx.Stealth) met = 2.4f;
+            if (_ctx.Shooting) met += 0.7f;
+            if (_ctx.Jumping) met += 1.6f;
+            met += _s.TerrainStrain * 2.2f + Math.Min(4f, _ctx.Speed * 0.35f);
+            if (LastSurface.Valid) met += LastSurface.Softness * 0.8f + LastSurface.SlopeDeg / 40f;
+            return met;
+        }
+        private void Exposure(float dt)
+        {
+            int interior = 0;
+            try { interior = Function.Call<int>(Hash.GET_INTERIOR_FROM_ENTITY, _ctx.Player.Handle); } catch { }
+            float shelter = interior != 0 ? 1f : 0f;
+            float wetTarget = shelter > 0.5f ? 0f : Mathx.Saturate(_ctx.Rain * 1.15f + (_ctx.InWater ? 1f : 0f) + _ctx.Snow * 0.35f);
+            float wetRate = wetTarget > _s.Wetness ? 0.18f : 0.045f + (_ctx.AmbientC > 20f ? 0.04f : 0f);
+            _s.Wetness = Mathx.Lerp(_s.Wetness, wetTarget, Mathx.ExpDecay(wetRate, dt));
+            float windN = Mathx.Clamp(_ctx.Wind / 12f, 0f, 1.5f);
+            float cold = 0f;
+            if (_ctx.AmbientC < 10f) cold = Mathx.Clamp((10f - _ctx.AmbientC) / 22f, 0f, 1.4f);
+            cold *= (1f + _s.Wetness * 0.9f + windN * 0.45f) * (1f - shelter * 0.85f);
+            if (_ctx.Snow > 0.15f) cold += 0.12f;
+            _s.ColdExposure = Mathx.Lerp(_s.ColdExposure, Mathx.Clamp(cold, 0f, 1.5f), Mathx.ExpDecay(0.08f, dt));
+            float heat = 0f;
+            if (_ctx.AmbientC > 26f) heat = Mathx.Clamp((_ctx.AmbientC - 26f) / 16f, 0f, 1.3f);
+            if (!_ctx.Night && shelter < 0.5f) heat += 0.08f * (1f - _ctx.Rain);
+            if (_ctx.Sprinting) heat += 0.12f;
+            _s.HeatExposure = Mathx.Lerp(_s.HeatExposure, Mathx.Clamp(heat * (1f - _s.Wetness * 0.25f), 0f, 1.4f), Mathx.ExpDecay(0.1f, dt));
+            float strain = LastSurface.Valid ? Mathx.Saturate(LastSurface.SlopeDeg / 28f + LastSurface.Softness * 0.25f) : 0f;
+            if (_ctx.Snow > 0.2f) strain += 0.18f;
+            if (_ctx.Rain > 0.35f) strain += 0.12f;
+            _s.TerrainStrain = Mathx.Lerp(_s.TerrainStrain, Mathx.Saturate(strain), 0.25f);
+        }
+        private void CoreTemp(float dt, float met)
+        {
+            float target = Mathx.Clamp(_ctx.Cfg.RestingCoreTempC + (met - 1f) * 0.045f - _s.ColdExposure * 0.19f + _s.HeatExposure * 0.15f - (1f - _s.Hydration) * 0.25f, 32.5f, 41.2f);
+            _s.CoreTempC = Mathx.SmoothDamp(_s.CoreTempC, target, ref _tempVel, _s.ColdExposure > 0.6f ? 18f : 28f, 0.08f, dt);
+        }
+        private void Cardio(float dt, float met)
+        {
+            var cfg = _ctx.Cfg;
+            float hr = cfg.BasalHeartRate + (met - 1f) * 12.5f + (1f - _s.Hydration) * 18f + _s.Lactate * 3.2f + Math.Abs(_s.CoreTempC - cfg.RestingCoreTempC) * 7.5f + _s.MuscleFatigue * 0.22f;
+            if (_ctx.Shooting) hr += 14f;
+            hr = Mathx.Clamp(hr, cfg.BasalHeartRate - 4f, cfg.MaxHeartRate);
+            _s.HeartRate = Mathx.SmoothDamp(_s.HeartRate, hr, ref _hrVel, _ctx.Sprinting ? 2.2f : 4.8f, 40f, dt);
+            float spo2 = 98.5f - Math.Max(0f, _s.HeartRate - 140f) * 0.06f - _s.Lactate * 0.35f - (_ctx.Swimming ? 1.2f : 0f);
+            _s.BloodOxygen = Mathx.Clamp(Mathx.Lerp(_s.BloodOxygen, spo2, 0.15f), 82f, 99.5f);
+        }
+        private void Fatigue(float dt, float met)
+        {
+            float work = Math.Max(0f, met - 2.2f);
+            float gain = work * 1.65f * (1f + _s.TerrainStrain) * (1.15f - 0.15f * _s.Glycogen);
+            float rec = 2.8f * _s.Hydration * ((_ctx.Walking || (!_ctx.Running && !_ctx.Sprinting)) ? 1f : 0.15f);
+            if (_ctx.Speed < 0.4f) rec *= 1.8f;
+            _s.MuscleFatigue = Mathx.Clamp(_s.MuscleFatigue + (gain - rec) * dt, 0f, 100f);
+            float lacClear = 0.18f + (_s.HeartRate > 100f ? 0.06f : 0.12f);
+            _s.Lactate = Mathx.Clamp(_s.Lactate + (work * 0.22f - lacClear * _s.Lactate) * dt, 0f, 18f);
+        }
+        private void StaminaTick(float dt, float met)
+        {
+            float drain = Math.Max(0f, met - 2.0f) * 6.4f * (1f + (1f - _s.Hydration) * 0.5f + _s.MuscleFatigue * 0.006f);
+            float regen = 7.5f * _s.Hydration * (1f - _s.HeatExposure * 0.35f);
+            if (_ctx.Sprinting) regen = 0f; else if (_ctx.Running) regen *= 0.15f; else if (_ctx.Walking) regen *= 0.55f;
+            float target = Mathx.Clamp(_s.Stamina - drain * dt + regen * dt, 0f, _ctx.Cfg.StaminaMax);
+            _s.Stamina = Mathx.SmoothDamp(_s.Stamina, target, ref _stamVel, 0.35f, 80f, dt);
+        }
+        private void Penalties()
+        {
+            float hrN = Mathx.Saturate((_s.HeartRate - 90f) / 90f);
+            float fatN = _s.MuscleFatigue / 100f;
+            float tempOff = Math.Abs(_s.CoreTempC - 37f);
+            _s.HandTremor = Mathx.Saturate(hrN * 0.45f + fatN * 0.25f + (_s.IsHypothermic ? 0.35f : 0f) + (1f - _s.BloodOxygen / 98f) * 1.2f + (1f - _s.Glycogen) * 0.12f);
+            _s.AimPenalty = Mathx.Saturate(_s.HandTremor * 0.85f + _s.Lactate * 0.02f + _s.Wetness * 0.08f);
+            _s.ReactionPenalty = Mathx.Saturate(fatN * 0.4f + (1f - _s.Stamina / 100f) * 0.35f + tempOff * 0.08f + (_s.Thirst < 20f ? 0.2f : 0f));
+            _s.MovePenalty = Mathx.Clamp(fatN * 0.5f + _s.TerrainStrain * 0.35f + _s.ColdExposure * 0.2f + _s.HeatExposure * 0.15f + (1f - _s.Stamina / 100f) * 0.4f, 0f, 0.92f);
+            _s.GripPenalty = Mathx.Saturate(_s.Wetness * 0.45f + _s.ColdExposure * 0.35f + _s.HandTremor * 0.25f + (LastSurface.Wet ? 0.15f : 0f));
+        }
+        private void FieldConsume()
+        {
+            try
+            {
+                bool reload = Game.IsControlPressed(0, Control.Reload);
+                if (reload && Game.IsControlJustPressed(0, Control.Duck))
+                {
+                    _s.Hunger = Mathx.Clamp(_s.Hunger + 28f, 0f, _ctx.Cfg.HungerMax);
+                    _s.Glycogen = Mathx.Saturate(_s.Glycogen + 0.22f);
+                    _ctx.Log.Info("Physiology", "Ration Hunger=" + _s.Hunger.ToString("0.0"));
+                }
+                if (reload && Game.IsControlJustPressed(0, Control.Jump))
+                {
+                    _s.Thirst = Mathx.Clamp(_s.Thirst + 34f, 0f, _ctx.Cfg.ThirstMax);
+                    _s.Hydration = Mathx.Saturate(_s.Hydration + 0.25f);
+                    _s.CoreTempC -= _s.HeatExposure * 0.08f;
+                    _ctx.Log.Info("Physiology", "Water Thirst=" + _s.Thirst.ToString("0.0"));
+                }
+            }
+            catch { }
+        }
+        private void ApplyEffects()
+        {
+            Ped ped = _ctx.Player;
+            try
+            {
+                if (_s.BaseAccuracy < 0)
+                {
+                    _s.BaseAccuracy = Function.Call<int>(Hash.GET_PED_ACCURACY, ped.Handle);
+                    if (_s.BaseAccuracy < 5) _s.BaseAccuracy = 70;
+                }
+                int acc = (int)Mathx.Clamp(_s.BaseAccuracy * (1f - _s.AimPenalty * 0.85f) - _s.HandTremor * 25f, 5f, 100f);
+                Function.Call(Hash.SET_PED_ACCURACY, ped.Handle, acc);
+                float blend = Mathx.Clamp(1f - _s.MovePenalty, 0.18f, 1f);
+                Function.Call(Hash.SET_PED_MAX_MOVE_BLEND_RATIO, ped.Handle, blend);
+                Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, ped.Handle, blend);
+                _shakeAmp = Mathx.Lerp(_shakeAmp, _s.HandTremor * 0.55f + (_s.HeartRate > 150f ? 0.12f : 0f), 0.2f);
+                uint now = (uint)Environment.TickCount;
+                if (_s.HandTremor > 0.15f && _ctx.Aiming && now - _lastShake > 180)
+                {
+                    Function.Call(Hash.SHAKE_GAMEPLAY_CAM, "SMALL_EXPLOSION_SHAKE", _shakeAmp * 0.28f);
+                    Function.Call(Hash.SET_PAD_SHAKE, 0, 80, (int)(_s.HandTremor * 110f));
+                    _lastShake = now;
+                }
+                if (_s.IsHypothermic && (Environment.TickCount / 400) % 2 == 0) Function.Call(Hash.SET_PAD_SHAKE, 0, 40, 40);
+                if (_s.Stamina <= 0.5f && (_ctx.Sprinting || _ctx.Running)) Function.Call(Hash.SET_PED_DESIRED_MOVE_BLEND_RATIO, ped.Handle, 0.35f);
+                _ctx.Log.Verbose("Physiology", "HR=" + _s.HeartRate.ToString("0.0") + " T=" + _s.CoreTempC.ToString("0.00") + " Fat=" + _s.MuscleFatigue.ToString("0.0") + " Stam=" + _s.Stamina.ToString("0.0") + " Acc=" + acc);
+            }
+            catch (Exception ex) { _ctx.Log.Error("Physiology", "ApplyEffects", ex); }
+        }
+    }
+
+    public sealed class SmartPhysicsEngine
+    {
+        private readonly GameContext _ctx;
+        private readonly PhysiologyEngine _phys;
+        private readonly SurfaceSampler _surf;
+        private Vector3 _simVel, _lastVel;
+        private float _mass = 86f, _acc, _heading, _airTime, _stumbleCd, _recoilCd;
+        private bool _headingInit, _velInit, _grounded;
+        private int _substeps;
+        private uint _lastJumpDisable;
+        private SurfaceHit _surface;
+        public SurfaceHit PlayerSurface { get { return _surface; } }
+        public float CarriedMassKg { get; private set; }
+        public bool Grounded { get { return _grounded; } }
+        public SmartPhysicsEngine(GameContext ctx, PhysiologyEngine phys) { _ctx = ctx; _phys = phys; _surf = new SurfaceSampler(ctx); }
+        public void Update(float dt)
+        {
+            if (!_ctx.Valid) return;
+            if (_ctx.Blocked || _ctx.Ragdoll) { _velInit = false; _acc = 0f; return; }
+            dt = Mathx.Clamp(dt, 0f, _ctx.Cfg.PhysicsMaxDt);
+            _acc += dt;
+            if (_stumbleCd > 0f) _stumbleCd -= dt;
+            if (_recoilCd > 0f) _recoilCd -= dt;
+            float step = 1f / Math.Max(30f, _ctx.Cfg.PhysicsHz);
+            int max = Mathx.ClampI(_ctx.Cfg.PhysicsMaxSubsteps, 1, 12);
+            int n = 0;
+            while (_acc >= step && n < max) { Substep(step); _acc -= step; n++; }
+            if (n == max) _acc = 0f;
+            _substeps = n;
+            _phys.NotifySurface(_surface);
+            ApplyMotorLimits();
+            HandleRecoil();
+            MaybeStumble(dt);
+        }
+        private void Substep(float dt)
+        {
+            Ped ped = _ctx.Player;
+            if (!NativeBridge.PedOk(ped)) return;
+            CarriedMassKg = LoadoutMass.EstimateKg(ped, _ctx.Cfg.EquipmentMassKgDefault, _ctx.Cfg.WeaponMassScale);
+            _mass = Mathx.Clamp(_ctx.Cfg.BodyMassKg + CarriedMassKg, 50f, 140f);
+            Vector3 gameVel = NativeBridge.Velocity(ped);
+            if (!_velInit) { _simVel = gameVel; _lastVel = gameVel; _velInit = true; }
+            else _simVel = _simVel * 0.72f + gameVel * 0.28f;
+            _surface = _surf.SamplePlayer(dt);
+            float height = _surface.Valid ? (ped.Position.Z - _surface.Point.Z) : 1f;
+            _grounded = _surface.Valid && height < 0.55f && !_ctx.Jumping && !_ctx.Swimming;
+            if (_grounded) _airTime = 0f; else _airTime += dt;
+            if (_ctx.OnFoot) SimulateOnFoot(dt, ped, gameVel);
+            else if (_ctx.OnMount) SimulateMounted(dt, ped, gameVel);
+            else if (_ctx.Swimming || _ctx.InWater) SimulateWater(dt, ped, gameVel);
+            ResolveNearbyPeds();
+            _lastVel = _simVel;
+        }
+        private void SimulateOnFoot(float dt, Ped ped, Vector3 gameVel)
+        {
+            var cfg = _ctx.Cfg; var st = _phys.State;
+            Vector3 force = Vector3.Zero;
+            Vector3 wish = WishDirection(ped);
+            float wishSpeed = DesiredSpeed(st);
+            Vector3 wishVel = wish * wishSpeed;
+            Vector3 vel = _simVel;
+            Vector3 relAir = vel - _ctx.WindVec * 0.35f;
+            float sp = relAir.Length();
+            if (sp > 0.05f) { float drag = 0.5f * cfg.AirDensity * cfg.PedCd * cfg.PedDragArea * sp; force += -Mathx.SafeNormalize(relAir) * drag * sp; }
+            force += _ctx.WindVec * (cfg.WindAccelScale * _mass * (1f + st.Wetness * 0.25f));
+            if (_grounded && _surface.Valid)
+            {
+                Vector3 nrm = _surface.Normal;
+                vel = Mathx.ProjectOnPlane(vel, nrm);
+                float muS = Mathx.Clamp(_surface.MuStatic * (1f - st.GripPenalty * 0.45f), 0.05f, 1.4f);
+                float muK = Mathx.Clamp(_surface.MuKinetic * (1f - st.GripPenalty * 0.50f), 0.03f, 1.2f);
+                float gN = cfg.Gravity * Math.Max(0.15f, nrm.Z);
+                Vector3 slopeDown = Mathx.SafeNormalize(Mathx.ProjectOnPlane(new Vector3(0f, 0f, -1f), nrm));
+                float slope = _surface.SlopeDeg;
+                if (slope >= cfg.SlopeSlideStartDeg)
+                {
+                    float k = Mathx.Saturate((slope - cfg.SlopeSlideStartDeg) / Math.Max(1f, cfg.SlopeUnwalkableDeg - cfg.SlopeSlideStartDeg));
+                    force += slopeDown * (cfg.Gravity * (float)Math.Sin(slope * Mathx.Deg2Rad) * k * (1f - muK * 0.5f)) * _mass;
+                    wishVel *= 1f - k * 0.85f;
+                }
+                Vector3 hWish = Mathx.ProjectOnPlane(wishVel, nrm);
+                Vector3 hVel = Mathx.ProjectOnPlane(vel, nrm);
+                Vector3 delta = hWish - hVel;
+                float dLen = delta.Length();
+                float fatigue = 1f - st.MovePenalty;
+                float massN = Mathx.Clamp(_mass / 86f, 0.8f, 1.8f);
+                float accel = cfg.MaxAccelMps2 * fatigue / massN * (0.55f + muS * 0.45f);
+                float decel = cfg.MaxDecelMps2 * (0.40f + muK * 0.60f) / massN;
+                if (_surface.Kind == GroundKind.Mud) { accel *= 0.62f; decel *= 1.15f; }
+                if (_surface.Kind == GroundKind.Snow) { accel *= 0.70f; decel *= 0.90f; }
+                if (_surface.Kind == GroundKind.Ice) { accel *= 0.38f; decel *= 0.28f; }
+                if (st.Stamina < 8f) accel *= 0.45f;
+                if (st.IsHypothermic) accel *= 0.72f;
+                bool braking = hWish.Length() < 0.35f || Mathx.Dot(hWish, hVel) < 0f;
+                float maxA = braking ? decel : accel;
+                if (dLen > 0.0001f) force += delta * (Math.Min(dLen, maxA * dt) / dLen / dt) * _mass;
+                Vector3 slip = braking ? hVel : (hVel - Mathx.SafeNormalize(hWish) * Math.Min(hVel.Length(), wishSpeed));
+                Vector3 slipH = Mathx.Horizontal(slip);
+                float slipS = slipH.Length();
+                if (slipS > 0.03f)
+                {
+                    float fMax = muK * _mass * gN;
+                    force += (-Mathx.SafeNormalize(slipH) * Math.Min(fMax, slipS * _mass / Math.Max(dt, 0.001f))) * cfg.FrictionBlend;
+                }
+                if (slope >= cfg.SlopeUnwalkableDeg && nrm.Z < 0.62f) force += slopeDown * cfg.Gravity * 0.55f * _mass;
+                _simVel = vel;
+            }
+            else
+            {
+                Vector3 airDelta = Mathx.Horizontal(wish) * 1.6f - Mathx.Horizontal(vel);
+                force += Mathx.ClampLength(airDelta, 3.2f * (1f - st.MovePenalty)) * _mass;
+                if (_airTime > 0.35f) force += new Vector3(0f, 0f, -cfg.Gravity * 0.18f) * _mass;
+            }
+            IntegrateAndCommit(ped, dt, gameVel, force, true);
+            IntegrateHeading(ped, dt, st);
+        }
+        private void SimulateMounted(float dt, Ped ped, Vector3 gameVel)
+        {
+            float massN = Mathx.Clamp(_mass / 86f, 0.9f, 1.7f);
+            Vector3 extra = -Mathx.Horizontal(gameVel) * (0.08f * (massN - 1f) + _phys.State.MovePenalty * 0.12f);
+            Vector3 blended = Mathx.ClampLength(gameVel + extra * dt * 8f, 22f);
+            _simVel = _simVel * 0.5f + blended * 0.5f;
+            NativeBridge.SetVelocity(ped, gameVel + Mathx.ClampLength(_simVel - gameVel, 0.22f));
+        }
+        private void SimulateWater(float dt, Ped ped, Vector3 gameVel)
+        {
+            var cfg = _ctx.Cfg;
+            Vector3 vel = _simVel * 0.6f + gameVel * 0.4f;
+            float waterH; NativeBridge.TryWaterHeight(ped.Position, out waterH);
+            float submerged = Mathx.Saturate(Mathx.Clamp(waterH - (ped.Position.Z - 0.9f), 0f, 2.2f) / 1.4f);
+            float buoyancy = cfg.WaterDensity * 0.07f * cfg.Gravity * cfg.BuoyancyFactor * submerged;
+            Vector3 f = new Vector3(0f, 0f, buoyancy - _mass * cfg.Gravity * 0.15f * submerged);
+            float sp = vel.Length();
+            if (sp > 0.03f) f += -Mathx.SafeNormalize(vel) * (0.5f * cfg.WaterDensity * 1.2f * 0.45f * sp * sp * 0.0015f);
+            vel += Mathx.ClampLength(f * (1f / _mass) * dt, cfg.MaxVelocityDeltaPerStep);
+            vel *= (float)Math.Exp(-1.8f * submerged * dt);
+            _simVel = vel;
+            NativeBridge.SetVelocity(ped, gameVel + Mathx.ClampLength(vel - gameVel, cfg.MaxVelocityDeltaPerStep));
+        }
+        private void IntegrateAndCommit(Ped ped, float dt, Vector3 gameVel, Vector3 force, bool clampHoriz)
+        {
+            var cfg = _ctx.Cfg;
+            Vector3 a = force * (1f / _mass);
+            if (!Mathx.Finite(a)) return;
+            a = Mathx.ClampLength(a, 48f);
+            Vector3 vel = _simVel + Mathx.ClampLength(a * dt, cfg.MaxVelocityDeltaPerStep);
+            if (clampHoriz)
+            {
+                Vector3 h = Mathx.Horizontal(vel);
+                float maxS = cfg.MaxHorizontalSpeed * (1f - _phys.State.MovePenalty * 0.45f);
+                if (_surface.Kind == GroundKind.Ice) maxS *= 1.05f;
+                if (_surface.Kind == GroundKind.Mud) maxS *= 0.78f;
+                if (_surface.Kind == GroundKind.Snow) maxS *= 0.84f;
+                h = Mathx.ClampLength(h, maxS);
+                vel = new Vector3(h.X, h.Y, vel.Z);
+            }
+            if (_grounded && _surface.Valid)
+            {
+                vel = Mathx.ProjectOnPlane(vel, _surface.Normal);
+                if (vel.Z > 0.35f) vel.Z *= 0.35f;
+            }
+            _simVel = vel;
+            Vector3 blended = gameVel + Mathx.ClampLength(vel - gameVel, cfg.MaxVelocityDeltaPerStep) * cfg.MaxForceBlend;
+            if (_ctx.Climbing) blended = gameVel;
+            NativeBridge.SetVelocity(ped, blended);
+        }
+        private void IntegrateHeading(Ped ped, float dt, PhysiologyState st)
+        {
+            if (!_headingInit) { _heading = ped.Heading; _headingInit = true; }
+            float speed = Mathx.HorizontalLength(_simVel);
+            float massN = Mathx.Clamp(_mass / 86f, 0.8f, 1.9f);
+            float maxTurn = Mathx.Lerp(280f, 88f, Mathx.Saturate(speed / 7.2f));
+            maxTurn /= massN * (1f + st.MovePenalty * 0.65f);
+            if (_surface.Kind == GroundKind.Ice) maxTurn *= 0.55f;
+            if (_surface.Kind == GroundKind.Mud) maxTurn *= 0.78f;
+            if (st.GripPenalty > 0.4f) maxTurn *= 0.85f;
+            float diff = Mathx.NormalizeDeg(ped.Heading - _heading);
+            float step = maxTurn * dt;
+            if (diff > step) diff = step;
+            if (diff < -step) diff = -step;
+            _heading = Mathx.Normalize360(_heading + diff);
+            if (speed > 1.05f && Math.Abs(Mathx.NormalizeDeg(ped.Heading - _heading)) > 0.4f)
+            {
+                try { Function.Call(Hash.SET_ENTITY_HEADING, ped.Handle, _heading); } catch { }
+            }
+        }
+        private Vector3 WishDirection(Ped ped)
+        {
+            Vector3 camF = Mathx.SafeNormalize(Mathx.Horizontal(NativeBridge.CameraForward()));
+            Vector3 camR = new Vector3(camF.Y, -camF.X, 0f);
+            float x = 0f, y = 0f;
+            try
+            {
+                if (Game.IsControlPressed(0, Control.MoveUpOnly)) y += 1f;
+                if (Game.IsControlPressed(0, Control.MoveDownOnly)) y -= 1f;
+                if (Game.IsControlPressed(0, Control.MoveLeftOnly)) x -= 1f;
+                if (Game.IsControlPressed(0, Control.MoveRightOnly)) x += 1f;
+            }
+            catch { if (_ctx.Sprinting || _ctx.Running || _ctx.Walking) y = 1f; }
+            Vector3 w = camF * y + camR * x;
+            if (w.Length() < 0.12f) return _ctx.Speed > 0.4f ? Mathx.SafeNormalize(Mathx.Horizontal(NativeBridge.Forward(ped))) : Vector3.Zero;
+            return Mathx.SafeNormalize(Mathx.Horizontal(w));
+        }
+        private float DesiredSpeed(PhysiologyState st)
+        {
+            float s;
+            if (_ctx.Sprinting) s = 7.1f;
+            else if (_ctx.Running) s = 5.1f;
+            else if (_ctx.Walking) s = 2.15f;
+            else if (_ctx.Stealth) s = 1.35f;
+            else if (_ctx.Speed > 0.3f) s = Math.Min(_ctx.Speed, 5.1f);
+            else s = 0f;
+            s *= 1f - st.MovePenalty * 0.55f;
+            s *= Mathx.Clamp(86f / Math.Max(60f, _mass), 0.72f, 1.05f);
+            return Math.Max(0f, s);
+        }
+        private void ResolveNearbyPeds()
+        {
+            if (!_ctx.OnFoot) return;
+            Ped self = _ctx.Player;
+            Ped[] list;
+            try { list = World.GetNearbyPeds(self, _ctx.Cfg.PhysicsNearbyRadius); } catch { return; }
+            if (list == null) return;
+            int n = 0;
+            Vector3 ppos = self.Position;
+            float r0 = _ctx.Cfg.CollisionRadius;
+            int cap = _ctx.Cfg.PhysicsNearbyPedCap;
+            for (int i = 0; i < list.Length && n < cap; i++)
+            {
+                Ped o = list[i];
+                if (!NativeBridge.PedOk(o) || o.Handle == self.Handle) continue;
+                if (o.IsInVehicle()) continue;
+                try { if (Function.Call<bool>(Hash.IS_PED_ON_MOUNT, o.Handle)) continue; } catch { }
+                Vector3 d = Mathx.Horizontal(ppos - o.Position);
+                float dist = d.Length();
+                float min = r0 + _ctx.Cfg.CollisionRadius * 0.95f;
+                if (dist >= min || dist < 0.001f) continue;
+                Vector3 nrm = d * (1f / dist);
+                Vector3 ov = NativeBridge.Velocity(o);
+                Vector3 rel = Mathx.Horizontal(_simVel - ov);
+                float relN = Mathx.Dot(rel, nrm);
+                float j = 0f;
+                if (relN < 0f) j = -(1f + _ctx.Cfg.RestitutionPed) * relN / (1f / _mass + 1f / 72f);
+                Vector3 impulse = nrm * j;
+                _simVel += impulse * (1f / _mass);
+                Vector3 v2 = ov - impulse * (1f / 72f);
+                NativeBridge.SetVelocity(self, NativeBridge.Velocity(self) + Mathx.ClampLength(_simVel - NativeBridge.Velocity(self), 0.35f));
+                NativeBridge.SetVelocity(o, ov + Mathx.ClampLength(v2 - ov, 0.28f));
+                if (-relN > _ctx.Cfg.ImpactStumbleSpeed && _stumbleCd <= 0f) TriggerStumble(self, 120, "ped-impact");
+                n++;
+            }
+        }
+        private void HandleRecoil()
+        {
+            if (!_ctx.Shooting || _recoilCd > 0f || !_ctx.OnFoot) return;
+            _recoilCd = 0.09f;
+            float impulse = Mathx.Clamp(LoadoutMass.WeaponKg(_ctx.Player) / Math.Max(0.4f, _ctx.Cfg.RecoilMassRefKg), 0.35f, 2.8f);
+            impulse *= 1f + _phys.State.GripPenalty * 0.55f + _phys.State.HandTremor * 0.4f;
+            Vector3 back = -Mathx.SafeNormalize(Mathx.Horizontal(_ctx.Fwd)) * impulse * 0.55f;
+            NativeBridge.SetVelocity(_ctx.Player, NativeBridge.Velocity(_ctx.Player) + Mathx.ClampLength(back, 0.42f));
+            try
+            {
+                Function.Call(Hash.SHAKE_GAMEPLAY_CAM, "SMALL_EXPLOSION_SHAKE", 0.045f * impulse);
+                Function.Call(Hash.SET_PAD_SHAKE, 0, 70, (int)Mathx.Clamp(impulse * 48f, 20f, 160f));
+            }
+            catch { }
+        }
+        private void MaybeStumble(float dt)
+        {
+            if (!_ctx.OnFoot || _stumbleCd > 0f) return;
+            Vector3 a = (_simVel - _lastVel) / Math.Max(dt, 0.001f);
+            float lat = Mathx.HorizontalLength(a);
+            bool iceSlip = _surface.Kind == GroundKind.Ice && Mathx.HorizontalLength(_simVel) > 3.2f && lat > 8f;
+            bool slopeFall = _surface.Valid && _surface.SlopeDeg > _ctx.Cfg.SlopeUnwalkableDeg && _ctx.Speed > 2.5f;
+            bool wetSprint = _surface.Wet && _ctx.Sprinting && lat > _ctx.Cfg.StumbleAccel;
+            if (lat > _ctx.Cfg.StumbleAccel * (1.15f - _phys.State.GripPenalty) || iceSlip || slopeFall || wetSprint)
+                TriggerStumble(_ctx.Player, 90, "accel");
+        }
+        private void TriggerStumble(Ped ped, int ms, string why)
+        {
+            _stumbleCd = 1.15f;
+            try { Function.Call(Hash.SET_PED_TO_RAGDOLL, ped.Handle, ms, ms + 80, 0, false, false, false); _ctx.Log.Info("Physics", "Stumble " + why + " v=" + _ctx.Speed.ToString("0.00")); }
+            catch { try { Function.Call(Hash.SET_PAD_SHAKE, 0, 180, 180); } catch { } }
+            _phys.State.MuscleFatigue = Mathx.Clamp(_phys.State.MuscleFatigue + 4.5f, 0f, 100f);
+            _phys.State.Stamina = Mathx.Clamp(_phys.State.Stamina - 6f, 0f, 100f);
+        }
+        private void ApplyMotorLimits()
+        {
+            if (!_ctx.Valid || !_ctx.OnFoot) return;
+            try
+            {
+                float rate = Mathx.Clamp(1.02f - (_mass / 86f - 1f) * 0.18f - _phys.State.MovePenalty * 0.5f - _ctx.Snow * 0.15f - (_surface.Kind == GroundKind.Mud ? 0.14f : 0f), 0.2f, 1.05f);
+                Function.Call(Hash.SET_PED_MOVE_RATE_OVERRIDE, _ctx.Player.Handle, rate);
+                Function.Call(Hash.SET_PED_MAX_MOVE_BLEND_RATIO, _ctx.Player.Handle, rate);
+                if (_surface.Valid && _surface.SlopeDeg > _ctx.Cfg.SlopeUnwalkableDeg * 0.85f && _ctx.Sprinting)
+                    Function.Call(Hash.SET_PED_DESIRED_MOVE_BLEND_RATIO, _ctx.Player.Handle, 0.4f);
+                if (_phys.State.IsExhausted)
+                {
+                    Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.Sprint, true);
+                    uint t = (uint)Environment.TickCount;
+                    if (t - _lastJumpDisable > 16) { Function.Call(Hash.DISABLE_CONTROL_ACTION, 0, (int)Control.Jump, true); _lastJumpDisable = t; }
+                }
+                _ctx.Log.Verbose("Physics", "g=" + _grounded + " " + _surface.Kind + " slp=" + _surface.SlopeDeg.ToString("0.0") + " kg=" + _mass.ToString("0.0") + " n=" + _substeps + " v=" + Mathx.HorizontalLength(_simVel).ToString("0.00"));
+            }
+            catch (Exception ex) { _ctx.Log.Error("Physics", "MotorLimits", ex); }
+        }
+    }
+
+    public sealed class CampSite
+    {
+        public Prop Fire; public Prop Bedroll; public Prop Pot;
+        public Vector3 Position; public float Heading; public bool Lit;
+        public float Fuel = 100f; public float HeatRadius = 4.5f; public bool SmokeVisible;
+    }
+
+    public sealed class CampingEngine
+    {
+        public const string FireName = "p_campfire02x";
+        public const string BedName = "p_bedrollopen01x";
+        public const string PotName = "p_cs_pot01x";
+        private readonly uint _fireHash, _bedHash, _potHash;
+        private readonly GameContext _ctx;
+        private readonly PhysiologyEngine _phys;
+        private readonly List<CampSite> _sites = new List<CampSite>();
+        private readonly KeyEdge _keyG = new KeyEdge();
+        private readonly KeyEdge _keyH = new KeyEdge();
+        private float _accum; private string _lastDeny = ""; private int _denyCd, _loadFrames; private bool _pendingPlace;
+        public IReadOnlyList<CampSite> Sites { get { return _sites; } }
+        public CampSite Active { get; private set; }
+        public CampingEngine(GameContext ctx, PhysiologyEngine phys)
+        {
+            _ctx = ctx; _phys = phys;
+            _fireHash = (uint)Game.GenerateHash(FireName);
+            _bedHash = (uint)Game.GenerateHash(BedName);
+            _potHash = (uint)Game.GenerateHash(PotName);
+        }
+        public void Update(float dt)
+        {
+            if (!_ctx.Valid) return;
+            _accum += dt;
+            if (_accum < _ctx.Cfg.TickCamping) return;
+            float step = _accum; _accum = 0f;
+            if (_denyCd > 0) _denyCd--;
+            HandleInput(); PumpPendingPlace(); Maintain(step); Warmth(step);
+        }
+        private void HandleInput()
+        {
+            try
+            {
+                bool aim = Game.IsControlPressed(0, Control.Aim);
+                bool context = false; try { context = Game.IsControlJustPressed(0, Control.Context); } catch { }
+                if (_keyG.WentDown(Keys.G) || (aim && context)) RequestPlace();
+                bool reload = Game.IsControlJustPressed(0, Control.Reload);
+                if (_keyH.WentDown(Keys.H) || (aim && reload)) TryPack();
+            }
+            catch (Exception ex) { _ctx.Log.Error("Camping", "Input", ex); }
+        }
+        private void RequestPlace()
+        {
+            string reason; Vector3 pos; float heading; Vector3 normal;
+            if (!Evaluate(_ctx.Player, out pos, out heading, out normal, out reason)) { Deny(reason); return; }
+            _pendingPlace = true; _loadFrames = 0;
+            NativeBridge.RequestModel(_fireHash); NativeBridge.RequestModel(_bedHash); NativeBridge.RequestModel(_potHash);
+        }
+        private void PumpPendingPlace()
+        {
+            if (!_pendingPlace) return;
+            _loadFrames++;
+            NativeBridge.RequestModel(_fireHash); NativeBridge.RequestModel(_bedHash); NativeBridge.RequestModel(_potHash);
+            bool ready = NativeBridge.ModelLoaded(_fireHash) && NativeBridge.ModelLoaded(_bedHash) && NativeBridge.ModelLoaded(_potHash);
+            if (!ready) { if (_loadFrames > 90) { _pendingPlace = false; Deny("Camp models not ready."); } return; }
+            _pendingPlace = false; TrySpawn();
+        }
+        private void TrySpawn()
+        {
+            string reason; Vector3 pos; float heading; Vector3 normal;
+            if (!Evaluate(_ctx.Player, out pos, out heading, out normal, out reason)) { Deny(reason); ReleaseModels(); return; }
+            try
+            {
+                Vector3 fwd = Mathx.Horizontal(_ctx.Fwd);
+                if (fwd.Length() < 0.01f) fwd = new Vector3(0f, 1f, 0f);
+                fwd = Mathx.SafeNormalize(fwd);
+                int fire = Function.Call<int>(Hash.CREATE_OBJECT, _fireHash, pos.X, pos.Y, pos.Z, true, true, false, false, true);
+                if (!NativeBridge.DoesExist(fire)) { Deny("Failed to spawn p_campfire02x."); ReleaseModels(); return; }
+                Function.Call(Hash.SET_ENTITY_HEADING, fire, heading);
+                Function.Call(Hash.PLACE_ENTITY_ON_GROUND_PROPERLY, fire, true);
+                Function.Call(Hash.FREEZE_ENTITY_POSITION, fire, true);
+                Vector3 bedPos = pos - fwd * 1.35f; float bz; NativeBridge.TryGroundZ(bedPos + new Vector3(0f, 0f, 2f), out bz); bedPos.Z = bz;
+                int bed = Function.Call<int>(Hash.CREATE_OBJECT, _bedHash, bedPos.X, bedPos.Y, bedPos.Z, true, true, false, false, true);
+                if (NativeBridge.DoesExist(bed))
+                {
+                    Function.Call(Hash.SET_ENTITY_HEADING, bed, heading + 90f);
+                    Function.Call(Hash.PLACE_ENTITY_ON_GROUND_PROPERLY, bed, true);
+                    Function.Call(Hash.FREEZE_ENTITY_POSITION, bed, true);
+                }
+                Vector3 potPos = pos + fwd * 0.45f + new Vector3(-fwd.Y, fwd.X, 0f) * 0.55f; float pz; NativeBridge.TryGroundZ(potPos + new Vector3(0f, 0f, 2f), out pz); potPos.Z = pz;
+                int pot = Function.Call<int>(Hash.CREATE_OBJECT, _potHash, potPos.X, potPos.Y, potPos.Z, true, true, false, false, true);
+                if (NativeBridge.DoesExist(pot))
+                {
+                    Function.Call(Hash.SET_ENTITY_HEADING, pot, heading);
+                    Function.Call(Hash.PLACE_ENTITY_ON_GROUND_PROPERLY, pot, true);
+                    Function.Call(Hash.FREEZE_ENTITY_POSITION, pot, true);
+                }
+                var site = new CampSite
+                {
+                    Fire = new Prop(fire),
+                    Bedroll = NativeBridge.DoesExist(bed) ? new Prop(bed) : null,
+                    Pot = NativeBridge.DoesExist(pot) ? new Prop(pot) : null,
+                    Position = pos, Heading = heading, Lit = true, Fuel = 100f, SmokeVisible = true
+                };
+                _sites.Add(site); Active = site;
+                _ctx.Log.Info("Camping", "Placed " + pos.X.ToString("0.00") + "," + pos.Y.ToString("0.00") + "," + pos.Z.ToString("0.00"));
+                ReleaseModels();
+            }
+            catch (Exception ex) { _ctx.Log.Error("Camping", "TrySpawn", ex); Deny("Camp placement error."); ReleaseModels(); }
+        }
+        private void ReleaseModels() { NativeBridge.ReleaseModel(_fireHash); NativeBridge.ReleaseModel(_bedHash); NativeBridge.ReleaseModel(_potHash); }
+        public void TryPack()
+        {
+            CampSite n = Nearest(3.4f);
+            if (n == null) { Deny("No camp within reach."); return; }
+            Delete(n); _sites.Remove(n);
+            Active = _sites.Count > 0 ? _sites[_sites.Count - 1] : null;
+            _ctx.Log.Info("Camping", "Packed.");
+        }
+        public bool Evaluate(Ped ped, out Vector3 pos, out float heading, out Vector3 normal, out string reason)
+        {
+            pos = Vector3.Zero; heading = 0f; normal = new Vector3(0f, 0f, 1f); reason = "Unknown";
+            if (!NativeBridge.PedOk(ped)) { reason = "Invalid ped."; return false; }
+            if (_ctx.OnMount) { reason = "Dismount first."; return false; }
+            if (_ctx.Swimming || _ctx.InWater) { reason = "Cannot camp in water."; return false; }
+            if (_ctx.Shooting) { reason = "Cannot camp while firing."; return false; }
+            if (_ctx.Speed > 1.15f) { reason = "Stand still."; return false; }
+            if (_ctx.Ragdoll) { reason = "Cannot camp while off-balance."; return false; }
+            try { if (Function.Call<bool>(Hash.IS_PED_IN_COMBAT, ped.Handle, 0)) { reason = "Cannot camp during combat."; return false; } } catch { }
+            if (Hostile(ped)) { reason = "Hostiles too close."; return false; }
+            Vector3 fwd = Mathx.Horizontal(NativeBridge.Forward(ped));
+            if (fwd.Length() < 0.001f) fwd = new Vector3(0f, 1f, 0f);
+            fwd = Mathx.SafeNormalize(fwd);
+            Vector3 probe = ped.Position + fwd * _ctx.Cfg.CampPlaceDistance + new Vector3(0f, 0f, 0.4f);
+            float gz;
+            if (!NativeBridge.TryGroundZ(probe + new Vector3(0f, 0f, 8f), out gz)) { reason = "No solid ground."; return false; }
+            pos = new Vector3(probe.X, probe.Y, gz); heading = ped.Heading;
+            float wh;
+            if (NativeBridge.TryWaterHeight(pos, out wh) && wh >= gz - 0.12f) { reason = "Flooded surface."; return false; }
+            float zL, zR, zF, zB;
+            NativeBridge.TryGroundZ(pos + new Vector3(-0.7f, 0f, 2f), out zL);
+            NativeBridge.TryGroundZ(pos + new Vector3(0.7f, 0f, 2f), out zR);
+            NativeBridge.TryGroundZ(pos + new Vector3(0f, 0.7f, 2f), out zF);
+            NativeBridge.TryGroundZ(pos + new Vector3(0f, -0.7f, 2f), out zB);
+            float slope = (float)Math.Atan(Math.Max(Math.Abs(zL - zR), Math.Abs(zF - zB)) / 1.4f) * Mathx.Rad2Deg;
+            if (slope > _ctx.Cfg.CampMaxSlopeDegrees) { reason = "Slope too steep (" + slope.ToString("0.0") + ")."; return false; }
+            normal = Mathx.SafeNormalize(new Vector3(zL - zR, zB - zF, 1.4f));
+            if (!Clear(pos, _ctx.Cfg.CampMinClearRadius, ped.Handle)) { reason = "Area obstructed."; return false; }
+            try { if (Function.Call<int>(Hash.GET_INTERIOR_FROM_ENTITY, ped.Handle) != 0) { reason = "Not a wilderness camp indoors."; return false; } } catch { }
+            reason = "OK"; return true;
+        }
+        private bool Hostile(Ped player)
+        {
+            try
+            {
+                Ped[] peds = World.GetNearbyPeds(player, 28f);
+                if (peds == null) return false;
+                int n = 0;
+                foreach (Ped p in peds)
+                {
+                    if (n++ > 32) break;
+                    if (!NativeBridge.PedOk(p) || p.Handle == player.Handle || p.IsPlayer) continue;
+                    bool combat = false; try { combat = Function.Call<bool>(Hash.IS_PED_IN_COMBAT, p.Handle, player.Handle); } catch { }
+                    if (combat) return true;
+                    try { if (p.GetRelationship(player) == Relationship.Hate && player.Position.DistanceTo(p.Position) < 16f) return true; } catch { }
+                }
+            }
+            catch (Exception ex) { _ctx.Log.Error("Camping", "Hostile", ex); }
+            return false;
+        }
+        private bool Clear(Vector3 pos, float radius, int ignore)
+        {
+            Vector3 from = pos + new Vector3(0f, 0f, 0.2f);
+            Vector3[] dirs = { new Vector3(radius, 0f, 0.3f), new Vector3(-radius, 0f, 0.3f), new Vector3(0f, radius, 0.3f), new Vector3(0f, -radius, 0.3f), new Vector3(radius * 0.7f, radius * 0.7f, 0.3f), new Vector3(0f, 0f, 2.2f) };
+            for (int i = 0; i < dirs.Length; i++)
+            {
+                Vector3 hit; int ent;
+                if (!NativeBridge.ClearLos(from, from + dirs[i], 1 | 16 | 256, ignore, out hit, out ent))
+                    if (from.DistanceTo(hit) < radius * 0.72f) return false;
+            }
+            try
+            {
+                Prop[] props = World.GetNearbyProps(pos, radius * 0.9f);
+                if (props == null) return true;
+                int c = 0;
+                foreach (Prop pr in props)
+                {
+                    if (c++ > 24) break;
+                    if (pr != null && pr.Exists() && pr.Position.DistanceTo(pos) < radius * 0.55f) return false;
+                }
+            }
+            catch { }
+            return true;
+        }
+        private void Maintain(float dt)
+        {
+            for (int i = _sites.Count - 1; i >= 0; i--)
+            {
+                CampSite s = _sites[i];
+                if (s.Fire == null || !s.Fire.Exists()) { Delete(s); _sites.RemoveAt(i); continue; }
+                if (!s.Lit) continue;
+                s.Fuel = Mathx.Clamp(s.Fuel - (0.55f + _ctx.Rain * 1.8f + _ctx.Wind * 0.04f) * dt, 0f, 100f);
+                if (s.Fuel <= 0f) { s.Lit = false; s.SmokeVisible = false; _ctx.Log.Info("Camping", "Fire out."); }
+                else
+                {
+                    s.SmokeVisible = s.Fuel > 8f;
+                    try { Function.Call(Hash.DRAW_LIGHT_WITH_RANGE, s.Position.X, s.Position.Y, s.Position.Z + 0.35f, 255, 140, 40, 8.0f, 18.0f * (s.Fuel / 100f)); } catch { }
+                }
+            }
+        }
+        private void Warmth(float dt)
+        {
+            float warmth = 0f;
+            for (int i = 0; i < _sites.Count; i++)
+            {
+                CampSite s = _sites[i];
+                if (!s.Lit || s.Fire == null || !s.Fire.Exists()) continue;
+                float d = _ctx.Pos.DistanceTo(s.Position);
+                if (d < s.HeatRadius) warmth = Math.Max(warmth, (1f - d / s.HeatRadius) * (s.Fuel / 100f));
+            }
+            if (warmth <= 0f) return;
+            PhysiologyState st = _phys.State;
+            st.ColdExposure = Mathx.Clamp(st.ColdExposure - warmth * 0.35f * dt, 0f, 1.5f);
+            if (st.CoreTempC < 37.1f) st.CoreTempC += warmth * 0.12f * dt;
+            st.Wetness = Mathx.Clamp(st.Wetness - warmth * 0.08f * dt, 0f, 1f);
+            if (_ctx.Speed < 0.35f)
+            {
+                st.MuscleFatigue = Mathx.Clamp(st.MuscleFatigue - warmth * 4.5f * dt, 0f, 100f);
+                st.Stamina = Mathx.Clamp(st.Stamina + warmth * 6f * dt, 0f, 100f);
+            }
+        }
+        private CampSite Nearest(float max)
+        {
+            CampSite best = null; float bd = max;
+            for (int i = 0; i < _sites.Count; i++)
+            {
+                CampSite s = _sites[i];
+                if (s.Fire == null || !s.Fire.Exists()) continue;
+                float d = _ctx.Pos.DistanceTo(s.Position);
+                if (d < bd) { bd = d; best = s; }
+            }
+            return best;
+        }
+        private void Delete(CampSite s) { Kill(s.Fire); Kill(s.Bedroll); Kill(s.Pot); }
+        private static void Kill(Prop p) { try { if (p != null && p.Exists()) Function.Call(Hash.DELETE_OBJECT, p.Handle); } catch { } }
+        private void Deny(string r)
+        {
+            if (_denyCd > 0 && r == _lastDeny) return;
+            _lastDeny = r; _denyCd = 8;
+            _ctx.Log.Warn("Camping", r);
+            try { Screen.ShowSubtitle(r, 2500); } catch { }
+        }
+        public void Dispose()
+        {
+            for (int i = 0; i < _sites.Count; i++) Delete(_sites[i]);
+            _sites.Clear(); Active = null; ReleaseModels();
+        }
+    }
+
+    public enum StimulusKind { None, Gunshot, Voice, Footstep, CampSmoke, CampLight, Visual }
+    public struct Stimulus { public StimulusKind Kind; public Vector3 Position; public float Time; public float Intensity; public int Source; }
+    public struct Footprint { public Vector3 Position; public float Heading; public float Time; public float Wetness; public bool Sprint; }
+
+    public sealed class PerceptionEngine
+    {
+        private sealed class Aware { public float Alert; public Vector3 Last; public bool Has; public float Until; }
+        private readonly GameContext _ctx;
+        private readonly CampingEngine _camp;
+        private readonly List<Footprint> _prints = new List<Footprint>(256);
+        private readonly Stimulus[] _ring = new Stimulus[64];
+        private readonly Stimulus[] _scratch = new Stimulus[64];
+        private readonly Dictionary<int, Aware> _aware = new Dictionary<int, Aware>(64);
+        private readonly Dictionary<int, int> _acc = new Dictionary<int, int>();
+        private readonly HashSet<int> _touch = new HashSet<int>();
+        private int _w; private float _time, _accum; private bool _wasShot; private Vector3 _lastPrint; private bool _hasPrint;
+        public PerceptionEngine(GameContext ctx, CampingEngine camp) { _ctx = ctx; _camp = camp; }
+        public void Update(float dt)
+        {
+            if (!_ctx.Valid) return;
+            _time += dt; _accum += dt;
+            Trail();
+            if (_ctx.Shooting && !_wasShot) Push(StimulusKind.Gunshot, _ctx.Pos, _ctx.Night ? 1f : 0.75f, _ctx.Player.Handle);
+            _wasShot = _ctx.Shooting;
+            IReadOnlyList<CampSite> sites = _camp.Sites;
+            for (int i = 0; i < sites.Count; i++)
+            {
+                CampSite s = sites[i];
+                if (s == null || !s.Lit) continue;
+                int src = s.Fire != null ? s.Fire.Handle : 0;
+                if (s.SmokeVisible) Push(StimulusKind.CampSmoke, s.Position, s.Fuel / 100f, src);
+                if (_ctx.Night) Push(StimulusKind.CampLight, s.Position, 0.8f * s.Fuel / 100f, src);
+            }
+            if (_accum < _ctx.Cfg.TickPerception) return;
+            _accum = 0f; Scan();
+        }
+        private void Trail()
+        {
+            if (_ctx.OnMount || _ctx.Speed < 0.35f) return;
+            if (!_hasPrint) { AddPrint(_ctx.Pos); _hasPrint = true; _lastPrint = _ctx.Pos; return; }
+            if (_ctx.Pos.DistanceTo(_lastPrint) >= _ctx.Cfg.FootstepSpacingMeters) { AddPrint(_ctx.Pos); _lastPrint = _ctx.Pos; }
+            int w = 0;
+            for (int i = 0; i < _prints.Count; i++)
+                if (_time - _prints[i].Time <= _ctx.Cfg.FootstepTrailLifetimeSeconds) { if (w != i) _prints[w] = _prints[i]; w++; }
+            if (w < _prints.Count) _prints.RemoveRange(w, _prints.Count - w);
+        }
+        private void AddPrint(Vector3 p)
+        {
+            _prints.Add(new Footprint { Position = p, Heading = _ctx.Player.Heading, Time = _time, Wetness = _ctx.Rain + (_ctx.InWater ? 1f : 0f), Sprint = _ctx.Sprinting });
+            if (_prints.Count > 400) _prints.RemoveRange(0, _prints.Count - 320);
+        }
+        private void Push(StimulusKind k, Vector3 p, float i, int src)
+        {
+            _ring[_w] = new Stimulus { Kind = k, Position = p, Time = _time, Intensity = i, Source = src };
+            _w = (_w + 1) % _ring.Length;
+        }
+        private int CopyRecent(float age)
+        {
+            int n = 0;
+            for (int i = 0; i < _ring.Length && n < _scratch.Length; i++)
+                if (_ring[i].Kind != StimulusKind.None && _time - _ring[i].Time <= age) _scratch[n++] = _ring[i];
+            return n;
+        }
+        private bool NearPrint(Vector3 h, float r, float maxAge, out Footprint fp)
+        {
+            fp = default(Footprint); float best = r; bool ok = false;
+            for (int i = _prints.Count - 1; i >= 0; i--)
+            {
+                if (_time - _prints[i].Time > maxAge) continue;
+                float d = h.DistanceTo(_prints[i].Position);
+                if (d < best) { best = d; fp = _prints[i]; ok = true; }
+            }
+            return ok;
+        }
+        private void Scan()
+        {
+            Ped player = _ctx.Player; Ped[] nearby;
+            try { nearby = World.GetNearbyPeds(player, Math.Max(_ctx.Cfg.LosMaxMeters, _ctx.Cfg.GunshotHearNightMeters)); }
+            catch (Exception ex) { _ctx.Log.Error("Perception", "Peds", ex); return; }
+            if (nearby == null) return;
+            _touch.Clear();
+            int nStim = CopyRecent(12f); int scanned = 0;
+            foreach (Ped ped in nearby)
+            {
+                if (scanned++ >= _ctx.Cfg.PerceptionPedScanCap) break;
+                if (!NativeBridge.PedOk(ped) || ped.Handle == player.Handle || ped.IsPlayer) continue;
+                _touch.Add(ped.Handle);
+                Aware a;
+                if (!_aware.TryGetValue(ped.Handle, out a)) { a = new Aware(); _aware[ped.Handle] = a; Strip(ped); }
+                float see = Vision(ped, player);
+                float hear = Hear(ped, nStim);
+                float track = Track(ped);
+                float stim = Math.Max(see, Math.Max(hear, track));
+                if (stim < 0.05f) a.Alert = Math.Max(0f, a.Alert - 0.18f * _ctx.Cfg.TickPerception);
+                else a.Alert = Mathx.Saturate(a.Alert + stim * 1.8f * _ctx.Cfg.TickPerception);
+                if (see > 0.55f) { a.Last = player.Position; a.Has = true; }
+                else if (track > 0.45f)
+                {
+                    Footprint fp;
+                    if (NearPrint(ped.Position, 3.2f, _ctx.Cfg.FootstepTrailLifetimeSeconds, out fp)) { a.Last = fp.Position; a.Has = true; }
+                }
+                Apply(ped, a, see);
+            }
+            if (_aware.Count == 0) return;
+            List<int> drop = null;
+            foreach (KeyValuePair<int, Aware> kv in _aware)
+                if (!_touch.Contains(kv.Key)) { if (drop == null) drop = new List<int>(); drop.Add(kv.Key); }
+            if (drop == null) return;
+            for (int i = 0; i < drop.Count; i++) { _aware.Remove(drop[i]); _acc.Remove(drop[i]); }
+        }
+        private void Strip(Ped ped)
+        {
+            try
+            {
+                Function.Call(Hash.SET_PED_SEEING_RANGE, ped.Handle, 0.01f);
+                Function.Call(Hash.SET_PED_HEARING_RANGE, ped.Handle, 0.01f);
+                Function.Call(Hash.SET_PED_ID_RANGE, ped.Handle, 0.01f);
+                Function.Call(Hash.SET_PED_VISUAL_FIELD_MIN_ANGLE, ped.Handle, 0.01f);
+                Function.Call(Hash.SET_PED_VISUAL_FIELD_MAX_ANGLE, ped.Handle, 0.01f);
+                Function.Call(Hash.SET_PED_VISUAL_FIELD_PERIPHERAL_RANGE, ped.Handle, 0.01f);
+            }
+            catch (Exception ex) { _ctx.Log.Error("Perception", "Strip", ex); }
+        }
+        private float Vision(Ped hunter, Ped player)
+        {
+            Vector3 eye = hunter.Position + new Vector3(0f, 0f, 0.72f);
+            Vector3 tgt = player.Position + new Vector3(0f, 0f, 0.65f);
+            float dist = eye.DistanceTo(tgt);
+            if (dist > _ctx.Cfg.LosMaxMeters) return 0f;
+            Vector3 to = Mathx.SafeNormalize(Mathx.Horizontal(tgt - eye));
+            Vector3 fwd = Mathx.SafeNormalize(Mathx.Horizontal(NativeBridge.Forward(hunter)));
+            float losDot = Mathx.Dot(fwd, to);
+            float fov = _ctx.Night ? 0.55f : 0.42f;
+            if (losDot < fov) return 0f;
+            Vector3 hit; int ent;
+            bool clear = NativeBridge.ClearLos(eye, tgt, 1 | 16 | 256, hunter.Handle, out hit, out ent);
+            if (!clear && ent != player.Handle) return 0f;
+            float light = _ctx.Night ? 0.28f : 1f;
+            if (_ctx.Night)
+            {
+                IReadOnlyList<CampSite> sites = _camp.Sites;
+                for (int i = 0; i < sites.Count; i++)
+                    if (sites[i].Lit && player.Position.DistanceTo(sites[i].Position) < 6f) light = Math.Max(light, 0.75f);
+            }
+            float stealth = (_ctx.Stealth ? 0.45f : 1f) * (_ctx.Speed < 0.2f ? 0.7f : 1f);
+            return Mathx.Saturate((1f - dist / _ctx.Cfg.LosMaxMeters) * light * stealth * ((losDot - fov) / (1f - fov)));
+        }
+        private float Hear(Ped hunter, int n)
+        {
+            float best = 0f;
+            float gun = _ctx.Night ? _ctx.Cfg.GunshotHearNightMeters : _ctx.Cfg.GunshotHearDayMeters;
+            for (int i = 0; i < n; i++)
+            {
+                Stimulus s = _scratch[i];
+                float range = 0f;
+                if (s.Kind == StimulusKind.Gunshot) range = gun;
+                else if (s.Kind == StimulusKind.Voice) range = _ctx.Cfg.VoiceHearMeters;
+                if (range <= 0f) continue;
+                float d = hunter.Position.DistanceTo(s.Position);
+                if (d < range) best = Math.Max(best, (1f - d / range) * s.Intensity);
+            }
+            if (_ctx.Shooting)
+            {
+                float d = hunter.Position.DistanceTo(_ctx.Pos);
+                if (d < gun) best = Math.Max(best, 1f - d / gun);
+            }
+            return Mathx.Saturate(best);
+        }
+        private float Track(Ped hunter)
+        {
+            Footprint fp;
+            float ageMax = _ctx.Cfg.FootstepTrailLifetimeSeconds * (_ctx.Rain > 0.4f ? 0.45f : 1f);
+            if (!NearPrint(hunter.Position, 2.6f, ageMax, out fp)) return 0f;
+            float vis = 0.35f + fp.Wetness * 0.4f + (fp.Sprint ? 0.2f : 0f) + (_ctx.Snow > 0.2f ? 0.25f : 0f) - (_ctx.Rain > 0.5f ? 0.2f : 0f);
+            return Mathx.Saturate((1f - (_time - fp.Time) / ageMax) * vis);
+        }
+        private float CampSig(Ped hunter)
+        {
+            float best = 0f;
+            IReadOnlyList<CampSite> sites = _camp.Sites;
+            for (int i = 0; i < sites.Count; i++)
+            {
+                CampSite site = sites[i];
+                if (site == null || !site.Lit) continue;
+                float d = hunter.Position.DistanceTo(site.Position);
+                Vector3 hit; int ent;
+                if (site.SmokeVisible && d < _ctx.Cfg.CampfireSmokeDetectMeters)
+                {
+                    bool sky = NativeBridge.ClearLos(site.Position + new Vector3(0f, 0f, 1.2f), site.Position + new Vector3(0f, 0f, 18f), 1, 0, out hit, out ent);
+                    best = Math.Max(best, (1f - d / _ctx.Cfg.CampfireSmokeDetectMeters) * (sky ? 1f : 0.25f) * 0.65f);
+                }
+                if (_ctx.Night && d < _ctx.Cfg.CampfireLightDetectMetersNight)
+                    if (NativeBridge.ClearLos(hunter.Position + new Vector3(0f, 0f, 0.7f), site.Position + new Vector3(0f, 0f, 0.5f), 1 | 16, hunter.Handle, out hit, out ent))
+                        best = Math.Max(best, (1f - d / _ctx.Cfg.CampfireLightDetectMetersNight) * 0.85f);
+            }
+            return Mathx.Saturate(best);
+        }
+        private void Apply(Ped ped, Aware a, float see)
+        {
+            try
+            {
+                float camp = CampSig(ped);
+                if (camp > a.Alert) a.Alert = Mathx.Lerp(a.Alert, camp, 0.35f);
+                Function.Call(Hash.SET_PED_SEEING_RANGE, ped.Handle, see > 0.2f ? 8f + see * 40f : 0.01f);
+                Function.Call(Hash.SET_PED_HEARING_RANGE, ped.Handle, a.Alert > 0.2f ? 6f + a.Alert * 28f : 0.01f);
+                Function.Call(Hash.SET_PED_ID_RANGE, ped.Handle, see > 0.6f ? 12f : 0.01f);
+                if (see > 0.2f)
+                {
+                    Function.Call(Hash.SET_PED_VISUAL_FIELD_MIN_ANGLE, ped.Handle, -55f);
+                    Function.Call(Hash.SET_PED_VISUAL_FIELD_MAX_ANGLE, ped.Handle, 55f);
+                }
+                else
+                {
+                    Function.Call(Hash.SET_PED_VISUAL_FIELD_MIN_ANGLE, ped.Handle, 0.01f);
+                    Function.Call(Hash.SET_PED_VISUAL_FIELD_MAX_ANGLE, ped.Handle, 0.01f);
+                }
+                Relationship rel = Relationship.Neutral;
+                try { rel = ped.GetRelationship(_ctx.Player); } catch { }
+                bool hostile = rel == Relationship.Hate || rel == Relationship.Dislike;
+                bool combat = false;
+                try { combat = Function.Call<bool>(Hash.IS_PED_IN_COMBAT, ped.Handle, _ctx.Player.Handle); } catch { }
+                if (combat && see < 0.12f && a.Alert < 0.25f) { Function.Call(Hash.CLEAR_PED_TASKS, ped.Handle, true, true); a.Until = _time + 6f; }
+                else if (hostile && see > 0.62f && a.Alert > 0.45f && !combat) Function.Call(Hash.TASK_COMBAT_PED, ped.Handle, _ctx.Player.Handle, 0, 16);
+                else if (a.Has && see < 0.15f && a.Alert > 0.3f && _time > a.Until)
+                {
+                    try { ped.Task.GoTo(a.Last); }
+                    catch { Function.Call(Hash.TASK_GO_STRAIGHT_TO_COORD, ped.Handle, a.Last.X, a.Last.Y, a.Last.Z, 1.0f, -1, 0f, 0f); }
+                    a.Until = _time + 9f;
+                }
+                if (!_acc.ContainsKey(ped.Handle))
+                {
+                    int ac = Function.Call<int>(Hash.GET_PED_ACCURACY, ped.Handle);
+                    _acc[ped.Handle] = ac < 5 ? 55 : ac;
+                }
+                Function.Call(Hash.SET_PED_ACCURACY, ped.Handle, see < 0.3f ? 8 : _acc[ped.Handle]);
+            }
+            catch (Exception ex) { _ctx.Log.Error("Perception", "Apply", ex); }
+        }
+    }
+
+    public sealed class RealismHud
+    {
+        private readonly GameContext _ctx;
+        private readonly PhysiologyEngine _phys;
+        private readonly SmartPhysicsEngine _px;
+        private bool _on = true;
+        private float _accum;
+        public RealismHud(GameContext ctx, PhysiologyEngine phys, SmartPhysicsEngine px) { _ctx = ctx; _phys = phys; _px = px; }
+        public void Update(float dt)
+        {
+            try
+            {
+                if (Game.IsControlJustPressed(0, Control.FrontendSelect)) _on = !_on;
+                if (!_on || !_ctx.Valid) return;
+                _accum += dt;
+                if (_accum < _ctx.Cfg.TickHud) return;
+                _accum = 0f;
+                PhysiologyState s = _phys.State;
+                string line = "HR " + s.HeartRate.ToString("0") + "  T " + s.CoreTempC.ToString("0.0") + "C  Fat " + s.MuscleFatigue.ToString("0") + "  H/Th " + s.Hunger.ToString("0") + "/" + s.Thirst.ToString("0") + "  Stam " + s.Stamina.ToString("0") + "  " + _px.PlayerSurface.Kind + "  slp " + _px.PlayerSurface.SlopeDeg.ToString("0") + "°  kg " + _px.CarriedMassKg.ToString("0.0");
+                if (s.IsHypothermic) line += "  COLD";
+                if (s.IsHyperthermic) line += "  HEAT";
+                if (s.IsExhausted) line += "  EXHAUST";
+                Screen.ShowSubtitle(line, 300);
+            }
+            catch (Exception ex) { _ctx.Log.Error("HUD", "Update", ex); }
+        }
+    }
+}
+```
+
+احفظه باسم `UltimateRealism.cs`. المشروع:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <RootNamespace>UltimateRealism</RootNamespace>
+    <AssemblyName>UltimateRealism</AssemblyName>
+    <AllowUnsafeBlocks>false</AllowUnsafeBlocks>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <OutputPath>bin\</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="ScriptHookRDRDotNet">
+      <HintPath>lib\ScriptHookRDRDotNet.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+</Project>
+```
+
+`dotnet build -c Release` ثم انسخ `bin\UltimateRealism.dll` إلى مجلد `scripts`. **G** مخيم، **H** فك، **Reload+Duck** أكل، **Reload+Jump** شرب.
+
+
+
+
